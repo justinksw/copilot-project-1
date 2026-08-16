@@ -5,16 +5,16 @@ const API_BASE_URL = window.NEXUS_API_BASE_URL
   || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
 const HISTORY_KEY = "nexus-watch-match-history-v1";
 const TEAM_LOGOS = Object.freeze({
-  BFX: "/assets/team-logos/BFX.png",
-  BRO: "/assets/team-logos/BRO.png",
-  DK: "/assets/team-logos/DK.png",
-  DNS: "/assets/team-logos/DNS.png",
-  GEN: "/assets/team-logos/GEN.png",
-  HLE: "/assets/team-logos/HLE.png",
-  KRX: "/assets/team-logos/KRX.png",
-  KT: "/assets/team-logos/KT.png",
-  NS: "/assets/team-logos/NS.png",
-  T1: "/assets/team-logos/T1.png"
+  BFX: "assets/team-logos/BFX.png",
+  BRO: "assets/team-logos/BRO.png",
+  DK: "assets/team-logos/DK.png",
+  DNS: "assets/team-logos/DNS.png",
+  GEN: "assets/team-logos/GEN.png",
+  HLE: "assets/team-logos/HLE.png",
+  KRX: "assets/team-logos/KRX.png",
+  KT: "assets/team-logos/KT.png",
+  NS: "assets/team-logos/NS.png",
+  T1: "assets/team-logos/T1.png"
 });
 const state = {
   dateOffset: 0,
