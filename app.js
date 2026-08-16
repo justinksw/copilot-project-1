@@ -1,5 +1,8 @@
 const TIME_ZONE = "Asia/Hong_Kong";
 const DEFAULT_STAGE_PAGE = "https://lol.fandom.com/wiki/LCK/2026_Season/Rounds_3-4";
+const REMOTE_API_URL = "https://nexus-watch-api.onrender.com";
+const API_BASE_URL = window.NEXUS_API_BASE_URL
+  || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
 const HISTORY_KEY = "nexus-watch-match-history-v1";
 const TEAM_LOGOS = Object.freeze({
   BFX: "/assets/team-logos/BFX.png",
@@ -64,7 +67,7 @@ function renderMatches() {
   }
 
   function teamMarkup(name, code, logo, score, dimScore) {
-    const logoSource = TEAM_LOGOS[code] || (logo ? `/api/logo?url=${encodeURIComponent(logo)}` : null);
+    const logoSource = TEAM_LOGOS[code] || (logo ? `${API_BASE_URL}/api/logo?url=${encodeURIComponent(logo)}` : null);
     const logoMarkup = logoSource
       ? `<img class="team-logo" src="${logoSource}" alt="${name} logo" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.classList.add('is-visible')" /><span class="team-logo logo-fallback">${code}</span>`
       : `<span class="team-logo">${code}</span>`;
@@ -150,7 +153,7 @@ async function loadMatchDetails(match) {
   state.detailLoading.add(match.id);
   renderMatches();
   try {
-    const response = await fetch(`/api/match-details?matchId=${encodeURIComponent(match.matchId)}`);
+    const response = await fetch(`${API_BASE_URL}/api/match-details?matchId=${encodeURIComponent(match.matchId)}`);
     if (!response.ok) throw new Error(`Match details unavailable (${response.status})`);
     state.details.set(match.id, await response.json());
   } catch (error) {
@@ -212,7 +215,7 @@ function saveHistory(matches) {
 }
 
 async function fetchProxyMatches() {
-  const response = await fetch("/api/matches");
+  const response = await fetch(`${API_BASE_URL}/api/matches`);
   if (!response.ok) throw new Error(`Local schedule proxy failed (${response.status})`);
   const payload = await response.json();
   if (payload?.stage?.label) {

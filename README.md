@@ -12,6 +12,16 @@ python3 server.py
 
 Times are rendered in Hong Kong time (`Asia/Hong_Kong`, UTC+8). The dashboard uses a local proxy that requests Leaguepedia's rendered `parse&prop=text` output and extracts the same `matchlist-content-wrapper` rows shown on the LCK tournament page. The proxy caches results for 10 minutes, avoiding browser CORS and Cargo API rate limits.
 
+## Publish with GitHub Pages
+
+GitHub Pages serves the frontend, while the Python API runs on Render because Pages cannot execute `server.py`.
+
+1. Create a Render Blueprint from this repository using [`render.yaml`](render.yaml). It creates the `nexus-watch-api` service.
+2. In the repository settings, enable **Pages → Build and deployment → GitHub Actions**.
+3. Push to `main`; `.github/workflows/pages.yml` deploys the dashboard to GitHub Pages.
+
+The frontend automatically uses `https://nexus-watch-api.onrender.com` when opened from GitHub Pages and continues using the local server during local development. If Render assigns a different URL, set `window.NEXUS_API_BASE_URL` before `app.js` in `index.html`.
+
 Leaguepedia is a community-maintained source and is useful for historical context and match links; it should not be treated as the sole source for time-sensitive live scores.
 
 The verified LCK entries for August 16, 2026 are sourced from [LCK 2026 Rounds 3-4](https://lol.fandom.com/wiki/LCK/2026_Season/Rounds_3-4): T1 0–2 Gen.G and KRX 1–2 BRO.
