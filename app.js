@@ -1,6 +1,6 @@
 const TIME_ZONE = "Asia/Hong_Kong";
 const DEFAULT_STAGE_PAGE = "https://lol.fandom.com/wiki/LCK/2026_Season/Rounds_3-4";
-const REMOTE_API_URL = "https://nexus-watch-api.onrender.com";
+const REMOTE_API_URL = "https://justin-watch-api.onrender.com";
 const API_BASE_URL = window.NEXUS_API_BASE_URL
   || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
 const HISTORY_KEY = "nexus-watch-match-history-v1";

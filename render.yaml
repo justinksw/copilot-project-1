@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: nexus-watch-api
+    name: justin-watch-api
     runtime: python
     plan: free
     buildCommand: ""
