@@ -342,7 +342,7 @@ def normalize_game_details(game, window, details, team_ids):
     patch = metadata.get("patchVersion", "")
     patch_parts = patch.split(".")
     patch_version = ".".join(patch_parts[:2] + ["1"]) if len(patch_parts) >= 2 else "16.15.1"
-    winner = determine_game_winner(teams, window_frame.get("gameState") or game.get("state"))
+    winner = determine_game_winner(teams, game.get("state") or window_frame.get("gameState"))
     return {
         "number": game["number"],
         "state": game["state"],
@@ -365,8 +365,13 @@ def load_game_details(match_id):
         detail = None
         window = None
         start = datetime.fromisoformat(match["startTime"])
+        probe_offsets = (
+            (360, 300, 240, 180, 120, 60, 30, 15, 0)
+            if game["state"] == "completed"
+            else (180, 120, 60, 30, 15, 0)
+        )
         with ThreadPoolExecutor(max_workers=2) as executor:
-            for offset in (180, 120, 60, 30, 15, 0):
+            for offset in probe_offsets:
                 timestamp = (start + timedelta(minutes=offset)).isoformat().replace("+00:00", "Z")
                 detail_future = executor.submit(fetch_feed, f"details/{game['id']}", timestamp)
                 window_future = executor.submit(fetch_feed, f"window/{game['id']}", timestamp)
