@@ -37,6 +37,13 @@ const dateKey = (date) => new Intl.DateTimeFormat("en-CA", { year: "numeric", mo
 const selectedDate = () => dateKey(new Date(Date.now() + state.dateOffset * 86400000));
 const formattedDate = () => dateFormatter.format(new Date(Date.now() + state.dateOffset * 86400000));
 const displayTime = (date) => timeFormatter.format(new Date(date));
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  "\"": "&quot;",
+  "'": "&#39;"
+}[character]));
 
 function renderMatches() {
   const visible = state.matches.filter((match) =>
@@ -45,10 +52,10 @@ function renderMatches() {
   $("#match-list").innerHTML = visible.map((match) => {
     const live = match.status === "live";
     const completed = match.status === "completed";
-    return `<article class="match-card ${state.expandedMatchId === match.id ? "is-expanded" : ""}" data-match-key="${match.id}" tabindex="0" aria-expanded="${state.expandedMatchId === match.id}">
-      <div class="match-meta"><strong>${match.time}</strong><span>${match.league}</span><span>${match.stage}</span></div>
+    return `<article class="match-card ${state.expandedMatchId === match.id ? "is-expanded" : ""}" data-match-key="${escapeHtml(match.id)}" tabindex="0" aria-expanded="${state.expandedMatchId === match.id}">
+      <div class="match-meta"><strong>${escapeHtml(match.time)}</strong><span>${escapeHtml(match.league)}</span><span>${escapeHtml(match.stage)}</span></div>
       <div class="team-column team-one">${teamMarkup(match.blue, match.blueCode, match.blueLogo, match.blueScore, completed && match.blueScore < match.redScore)}</div>
-      <div class="match-center"><span class="series">BEST OF ${match.series.replace("BO", "")}</span><span class="match-series-score">${match.blueScore ?? "—"} - ${match.redScore ?? "—"}</span><strong class="versus">VS</strong><span class="status ${match.status}">${live ? "● Live" : match.status}</span>${match.link ? `<a class="source-link" href="${match.link}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
+      <div class="match-center"><span class="series">BEST OF ${escapeHtml(match.series.replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${match.blueScore ?? "—"} - ${match.redScore ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(match.status)}">${live ? "● Live" : escapeHtml(match.status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
       <div class="team-column team-two">${teamMarkup(match.red, match.redCode, match.redLogo, match.redScore, completed && match.redScore < match.blueScore)}</div>
       ${state.expandedMatchId === match.id ? `<section class="match-details">${renderMatchDetails(match)}</section>` : ""}
     </article>`;
@@ -69,9 +76,9 @@ function renderMatches() {
   function teamMarkup(name, code, logo, score, dimScore) {
     const logoSource = TEAM_LOGOS[code] || (logo ? `${API_BASE_URL}/api/logo?url=${encodeURIComponent(logo)}` : null);
     const logoMarkup = logoSource
-      ? `<img class="team-logo" src="${logoSource}" alt="${name} logo" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.classList.add('is-visible')" /><span class="team-logo logo-fallback">${code}</span>`
-      : `<span class="team-logo">${code}</span>`;
-    return `${logoMarkup}<strong class="team-name">${name}</strong><span class="team-score ${dimScore ? "dim" : ""}">${score ?? "—"}</span>`;
+      ? `<img class="team-logo" src="${escapeHtml(logoSource)}" alt="${escapeHtml(name)} logo" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.classList.add('is-visible')" /><span class="team-logo logo-fallback">${escapeHtml(code)}</span>`
+      : `<span class="team-logo">${escapeHtml(code)}</span>`;
+    return `${logoMarkup}<strong class="team-name">${escapeHtml(name)}</strong><span class="team-score ${dimScore ? "dim" : ""}">${escapeHtml(score ?? "—")}</span>`;
   }
 }
 
@@ -83,7 +90,7 @@ function renderMatchDetails(match) {
     return `<p class="detail-message">Loading champion, item, and gold data…</p>`;
   }
   if (state.detailErrors.has(match.id)) {
-    return `<p class="detail-message">${state.detailErrors.get(match.id)}</p>`;
+    return `<p class="detail-message">${escapeHtml(state.detailErrors.get(match.id))}</p>`;
   }
   const details = state.details.get(match.id);
   if (!details) {
@@ -100,14 +107,14 @@ function gameDetailMarkup(match, game) {
   const teams = [game.teams.blue, game.teams.red];
   const winner = game.winner ? teamName(match, game.winner) : null;
   return `<section class="game-detail">
-    <div class="game-detail-heading"><strong>Game ${game.number}</strong>${winner ? `<span class="game-winner">${winner} won</span>` : ""}<span>${game.state}</span><span>Patch ${patch}</span></div>
+    <div class="game-detail-heading"><strong>Game ${escapeHtml(game.number)}</strong>${winner ? `<span class="game-winner">${escapeHtml(winner)} won</span>` : ""}<span>${escapeHtml(game.state)}</span><span>Patch ${escapeHtml(patch)}</span></div>
     <div class="game-detail-summary">
-      ${teams.map((team) => `<div class="detail-team-summary"><strong>${teamName(match, team.code)}</strong><span>${formatGold(team.totalGold)} gold · ${team.kills} kills</span></div>`).join('<span class="detail-divider">VS</span>')}
+      ${teams.map((team) => `<div class="detail-team-summary"><strong>${escapeHtml(teamName(match, team.code))}</strong><span>${escapeHtml(formatGold(team.totalGold))} gold · ${escapeHtml(team.kills)} kills</span></div>`).join('<span class="detail-divider">VS</span>')}
     </div>
     <div class="player-columns">
       ${teams.map((team, teamIndex) => {
         const opponent = teams[teamIndex === 0 ? 1 : 0];
-        return `<div class="player-column"><h4>${teamName(match, team.code)}</h4>${team.participants.map((player) => {
+        return `<div class="player-column"><h4>${escapeHtml(teamName(match, team.code))}</h4>${team.participants.map((player) => {
           const opponentPlayer = opponent.participants.find((candidate) => candidate.role === player.role);
           return participantMarkup(player, patch, opponentPlayer);
         }).join("")}</div>`;
@@ -118,17 +125,17 @@ function gameDetailMarkup(match, game) {
 
 function participantMarkup(player, patch, opponent) {
   const champion = player.champion
-    ? `<img class="champion-icon" src="https://ddragon.leagueoflegends.com/cdn/${patch}/img/champion/${encodeURIComponent(player.champion)}.png" alt="" loading="lazy" />`
+    ? `<img class="champion-icon" src="https://ddragon.leagueoflegends.com/cdn/${encodeURIComponent(patch)}/img/champion/${encodeURIComponent(player.champion)}.png" alt="" loading="lazy" />`
     : `<span class="champion-icon champion-placeholder">?</span>`;
   const items = player.items.length
-    ? player.items.map((item) => `<img class="item-icon" src="https://ddragon.leagueoflegends.com/cdn/${patch}/img/item/${item}.png" alt="" loading="lazy" />`).join("")
+    ? player.items.map((item) => `<img class="item-icon" src="https://ddragon.leagueoflegends.com/cdn/${encodeURIComponent(patch)}/img/item/${encodeURIComponent(item)}.png" alt="" loading="lazy" />`).join("")
     : '<span class="items-empty">—</span>';
   const goldDifference = player.gold - (opponent?.gold ?? player.gold);
   const csDifference = player.cs - (opponent?.cs ?? player.cs);
   return `<div class="player-row">
-    <div class="player-identity">${champion}<span><strong>${player.player}</strong><small>${player.role || "player"}</small></span></div>
-    <span class="player-kda">${player.kills}/${player.deaths}/${player.assists}</span>
-    <span class="player-economy"><span class="player-gold">${formatGold(player.gold)} <span class="stat-difference ${differenceClass(goldDifference)}">(${formatDifference(goldDifference)})</span></span><small>${player.cs} CS <span class="stat-difference ${differenceClass(csDifference)}">(${formatDifference(csDifference)})</span></small></span>
+    <div class="player-identity">${champion}<span><strong>${escapeHtml(player.player)}</strong><small>${escapeHtml(player.role || "player")}</small></span></div>
+    <span class="player-kda">${escapeHtml(`${player.kills}/${player.deaths}/${player.assists}`)}</span>
+    <span class="player-economy"><span class="player-gold">${escapeHtml(formatGold(player.gold))} <span class="stat-difference ${differenceClass(goldDifference)}">(${escapeHtml(formatDifference(goldDifference))})</span></span><small>${escapeHtml(player.cs)} CS <span class="stat-difference ${differenceClass(csDifference)}">(${escapeHtml(formatDifference(csDifference))})</span></small></span>
     <div class="item-list">${items}</div>
   </div>`;
 }
