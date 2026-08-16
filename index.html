@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A live League of Legends esports schedule and results dashboard." />
+    <title>Nexus Watch | LoL Esports</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#">
+        JUSTIN <em>WATCH</em>
+      </a>
+      <button class="refresh-button" id="refresh-button" type="button">
+        <span class="refresh-icon">↻</span> Refresh
+      </button>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-title">
+          <div>
+            <h1>League of Legends <span>Champions Korea</span></h1>
+            <div class="hero-subtitle"><span id="hero-stage">Current LCK season</span> · Match schedule and results</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="toolbar" id="matches">
+        <div class="date-nav">
+          <button class="date-arrow" id="previous-day" type="button" aria-label="Previous day">←</button>
+          <div><span class="date-label" id="date-label">Today</span><strong id="date-value"></strong></div>
+          <button class="date-arrow" id="next-day" type="button" aria-label="Next day">→</button>
+        </div>
+      </section>
+
+      <div class="content-grid">
+        <section class="matches-panel">
+          <div class="section-heading">
+            <div><h2 id="match-heading">Today's matches</h2></div>
+            <span class="updated" id="updated">Times shown in Hong Kong (UTC+8)</span>
+          </div>
+          <div class="match-list" id="match-list"></div>
+          <div class="empty-state" id="empty-state" hidden>No matches found for this date.</div>
+        </section>
+
+      </div>
+    </main>
+
+    <footer id="results"><span>© 2025 Nexus Watch</span><span>Built for the Rift · Data refreshes automatically</span></footer>
+    <script src="app.js"></script>
+  </body>
+</html>
