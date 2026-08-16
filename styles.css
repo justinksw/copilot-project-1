@@ -25,7 +25,7 @@ button { color: inherit; font: inherit; cursor: pointer; }
   height: 76px; justify-content: space-between; padding: 0 5.5%;
 }
 .brand { align-items: center; color: var(--ink); display: flex; font-family: "Space Grotesk"; font-size: 14px; font-weight: 700; gap: 10px; letter-spacing: .11em; text-decoration: none; }
-.brand em { color: var(--muted); font-style: normal; font-weight: 500; }
+.brand-muted { color: var(--muted); }
 .refresh-button { background: transparent; border: 1px solid var(--line); border-radius: 5px; font-size: 12px; padding: 9px 14px; }
 .refresh-icon { color: var(--accent); font-size: 16px; margin-right: 5px; }
 main { margin: 0 auto; max-width: 1280px; padding: 0 5.5% 80px; }
