@@ -6,3 +6,6 @@ services:
     buildCommand: ""
     startCommand: python3 server.py
     healthCheckPath: /
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
