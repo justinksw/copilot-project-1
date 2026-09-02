@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="A live League of Legends esports schedule and results dashboard." />
-    <title>JUSTIN · LOL · WATCH</title>
+    <meta name="description" content="A T1 League of Legends schedule, results, and LCK standings dashboard." />
+    <title>JUSTIN · T1 · WATCH</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
@@ -13,7 +13,7 @@
   <body>
     <header class="topbar">
       <a class="brand" href="#">
-        <span class="brand-muted">JUSTIN</span> · LOL · <span class="brand-muted">WATCH</span>
+        <span class="brand-muted">JUSTIN</span> · T1 · <span class="brand-muted">WATCH</span>
       </a>
       <button class="refresh-button" id="refresh-button" type="button">
         <span class="refresh-icon">↻</span> Refresh
@@ -24,8 +24,8 @@
       <section class="hero">
         <div class="hero-title">
           <div>
-            <h1>League of Legends <span>Champions Korea</span></h1>
-            <div class="hero-subtitle"><span id="hero-stage">Current LCK season</span> · Match schedule and results</div>
+            <h1>Follow <span>T1</span> in LCK</h1>
+            <div class="hero-subtitle"><span id="hero-stage">Stage loading…</span> · Match schedule and standings</div>
           </div>
         </div>
       </section>
@@ -38,6 +38,12 @@
         </div>
       </section>
 
+      <section class="team-summary" aria-label="T1 summary">
+        <div><span class="summary-label">NEXT OPPONENT</span><strong id="next-opponent">Loading…</strong><small id="next-match">Loading schedule…</small></div>
+        <div><span class="summary-label">T1 SERIES RECORD</span><strong id="team-record">—</strong><small>Completed matches in loaded history</small></div>
+        <span class="batch-status" id="batch-status" aria-live="polite">Loading schedule…</span>
+      </section>
+
       <div class="content-grid">
         <section class="matches-panel">
           <div class="section-heading">
@@ -47,7 +53,10 @@
           <div class="match-list" id="match-list"></div>
           <div class="empty-state" id="empty-state" hidden>No matches found for this date.</div>
         </section>
-
+        <aside class="standings-panel">
+          <div class="section-heading"><div><h2>LCK leaderboard</h2></div><span class="updated">Series · Games</span></div>
+          <ol class="standings-list" id="standings-list"></ol>
+        </aside>
       </div>
     </main>
 
