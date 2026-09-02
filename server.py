@@ -15,12 +15,17 @@ FEED_API = "https://feed.lolesports.com/livestats/v1"
 CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "matches": [],
-    "stage": {"page": "", "label": "", "year": ""},
+    "stage": {"page": "", "label": "", "year": "", "key": "", "refreshedAt": ""},
 }
 OFFICIAL_CACHE = {"expires": datetime.min.replace(tzinfo=timezone.utc), "by_key": {}, "by_id": {}}
 DETAIL_CACHE = {}
 LOGO_CACHE = {}
-DEFAULT_STAGE_SUFFIX = "Rounds_3-4"
+STANDINGS_CACHE = {
+    "expires": datetime.min.replace(tzinfo=timezone.utc),
+    "rows": [],
+}
+DEFAULT_STAGE_SUFFIX = "Rounds_3-4"  # Only used when Leaguepedia is unavailable.
+HONG_KONG = timezone(timedelta(hours=8))
 STAGE_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "pages": [],
@@ -103,19 +108,26 @@ def match_start(match):
 
 
 def select_active_stage(stage_matches):
-    now_hong_kong = datetime.now(timezone(timedelta(hours=8)))
+    now_hong_kong = datetime.now(HONG_KONG)
     upcoming = []
+    live = []
     latest_past = None
     for page, matches in stage_matches.items():
-        starts = [start for match in matches if (start := match_start(match))]
+        starts = [(match, match_start(match)) for match in matches]
+        starts = [(match, start) for match, start in starts if start]
         if not starts:
             continue
-        future_starts = [start for start in starts if start >= now_hong_kong]
+        live_starts = [start for match, start in starts if match["status"] == "live"]
+        if live_starts:
+            live.append((min(live_starts), page))
+        future_starts = [start for match, start in starts if start >= now_hong_kong and match["status"] != "completed"]
         if future_starts:
             upcoming.append((min(future_starts), page))
-        stage_latest = max(starts)
+        stage_latest = max(start for _, start in starts)
         if latest_past is None or stage_latest > latest_past[0]:
             latest_past = (stage_latest, page)
+    if live:
+        return min(live)[1]
     if upcoming:
         return min(upcoming)[1]
     return latest_past[1] if latest_past else default_stage_page(
@@ -213,6 +225,7 @@ def parse_matches(league, page, html, official_index=None):
         )
         if official:
             match.update(official)
+            match["id"] = official["matchId"]
         matches.append(match)
     return matches
 
@@ -405,22 +418,96 @@ def load_matches():
     matches = []
     official_index = load_official_index()["by_key"]
     stage_matches = {}
-    for page in discover_stage_pages():
-        try:
-            parsed = parse_matches("LCK", page, fetch_page(page), official_index)
-            stage_matches[page] = parsed
-            matches.extend(parsed)
-        except Exception as error:
-            print(f"[Leaguepedia] {page}: {error}")
+    pages = discover_stage_pages()
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(pages)))) as executor:
+        futures = {page: executor.submit(fetch_page, page) for page in pages}
+        for page, future in futures.items():
+            try:
+                parsed = parse_matches("LCK", page, future.result(), official_index)
+                stage_matches[page] = parsed
+                matches.extend(parsed)
+            except Exception as error:
+                print(f"[Leaguepedia] {page}: {error}")
     active_page = select_active_stage(stage_matches)
     CACHE["stage"] = {
         "page": active_page,
         "label": stage_label(active_page),
+        "key": active_page.rsplit("/", 1)[-1],
         "year": active_page.split("/")[1].split("_")[0],
+        "refreshedAt": now.isoformat(),
     }
     CACHE["matches"] = matches
     CACHE["expires"] = now + timedelta(minutes=10)
     return matches
+
+
+def normalize_date(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def requested_range(query):
+    today = datetime.now(HONG_KONG).date()
+    start = normalize_date(query.get("from", [None])[0]) or today - timedelta(days=1)
+    end = normalize_date(query.get("to", [None])[0]) or today + timedelta(days=1)
+    if end < start:
+        start, end = end, start
+    if (end - start).days > 31:
+        end = start + timedelta(days=31)
+    return start, end
+
+
+def team_matches(match, team):
+    if not team:
+        return True
+    wanted = team.strip().upper()
+    return wanted in {match.get("blueCode", "").upper(), match.get("redCode", "").upper(),
+                      match.get("blue", "").upper(), match.get("red", "").upper()}
+
+
+def build_standings(matches):
+    teams = {}
+    for match in matches:
+        if match.get("blueScore") is None or match.get("redScore") is None:
+            continue
+        for side, opponent in (("blue", "red"), ("red", "blue")):
+            code = match[f"{side}Code"]
+            team = teams.setdefault(code, {
+                "team": match[side], "code": code, "logo": match.get(f"{side}Logo"),
+                "wins": 0, "losses": 0, "gameWins": 0, "gameLosses": 0,
+            })
+            score = match[f"{side}Score"]
+            opponent_score = match[f"{opponent}Score"]
+            team["gameWins"] += score
+            team["gameLosses"] += opponent_score
+            if score > opponent_score:
+                team["wins"] += 1
+            else:
+                team["losses"] += 1
+    rows = sorted(
+        teams.values(),
+        key=lambda row: (-row["wins"], row["losses"], -(row["gameWins"] - row["gameLosses"]), row["team"]),
+    )
+    for rank, row in enumerate(rows, 1):
+        row.update({
+            "rank": rank,
+            "matchRecord": f"{row['wins']}-{row['losses']}",
+            "gameRecord": f"{row['gameWins']}-{row['gameLosses']}",
+            "points": row["wins"],
+            "isFavorite": row["code"] == "T1",
+        })
+    return rows
+
+
+def load_standings():
+    now = datetime.now(timezone.utc)
+    if STANDINGS_CACHE["expires"] > now:
+        return STANDINGS_CACHE["rows"]
+    rows = build_standings(load_matches())
+    STANDINGS_CACHE.update({"expires": now + timedelta(minutes=10), "rows": rows})
+    return rows
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -464,15 +551,36 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path.path == "/api/standings":
+            body = json.dumps({
+                "league": "LCK",
+                "season": CACHE["stage"]["year"],
+                "standings": load_standings(),
+                "cached": STANDINGS_CACHE["expires"].isoformat(),
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "public, max-age=600")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path.path != "/api/matches":
             return super().do_GET()
         matches = load_matches()
-        requested = parse_qs(path.query).get("date", [None])[0]
-        result = [match for match in matches if not requested or match["date"] == requested]
+        start, end = requested_range(parse_qs(path.query))
+        team = parse_qs(path.query).get("team", [None])[0]
+        result = [
+            match for match in matches
+            if start <= (normalize_date(match.get("date")) or start) <= end and team_matches(match, team)
+        ]
         body = json.dumps({
             "matches": result,
             "stage": CACHE["stage"],
+            "range": {"from": start.isoformat(), "to": end.isoformat()},
             "cached": CACHE["expires"].isoformat(),
+            "hasMore": True,
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
