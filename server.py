@@ -163,32 +163,71 @@ def load_official_index():
     if OFFICIAL_CACHE["expires"] > now:
         return OFFICIAL_CACHE
     by_key = {}
+    by_date = {}
     by_id = {}
     try:
         html = fetch_official_schedule()
-        chunks = re.split(r'(?=\{"__typename":"EventMatch","id":"\d+")', html)
+        marker = re.compile(
+            r'\{\s*"__typename"\s*:\s*"EventMatch"\s*,\s*"id"\s*:\s*"\d+"'
+        )
+        starts = [match.start() for match in marker.finditer(html)]
+        if not starts:
+            # Some Next.js responses put the schedule JSON inside an escaped
+            # script string instead of returning it as a raw JSON fragment.
+            html = html.replace('\\"', '"')
+            starts = [match.start() for match in marker.finditer(html)]
+        chunks = [
+            html[start:end]
+            for start, end in zip(starts, starts[1:] + [len(html)])
+        ]
         for chunk in chunks:
-            if '"__typename":"EventMatch"' not in chunk:
-                continue
-            event_match = re.search(r'\{"__typename":"EventMatch","id":"(\d+)"', chunk)
-            start_match = re.search(r'"startTime":"([^"]+)"', chunk)
-            if not event_match or not start_match:
-                continue
-            team_entries = re.findall(
-                r'"__typename":"MatchTeam","id":"([^"]+)".*?"code":"([^"]+)"',
+            event_match = re.search(
+                r'\{\s*"__typename"\s*:\s*"EventMatch"\s*,\s*"id"\s*:\s*"(\d+)"',
                 chunk,
             )
-            team_ids = {team_id.rsplit(":", 1)[-1]: code for team_id, code in team_entries}
-            games = [
-                {"id": game_id, "number": int(number), "state": state}
-                for game_id, state, number in re.findall(
-                    r'"__typename":"Game","id":"(\d+)","state":"([^"]+)","number":(\d+)',
-                    chunk,
+            start_match = re.search(r'"startTime"\s*:\s*"([^"]+)"', chunk)
+            if not event_match or not start_match:
+                continue
+            team_markers = list(re.finditer(
+                r'"__typename"\s*:\s*"MatchTeam"',
+                chunk,
+            ))
+            team_entries = []
+            for index, team_marker in enumerate(team_markers):
+                end = team_markers[index + 1].start() if index + 1 < len(team_markers) else len(chunk)
+                team_fragment = chunk[team_marker.start():end]
+                team_id = re.search(r'"id"\s*:\s*"([^"]+)"', team_fragment)
+                team_name = re.search(r'"name"\s*:\s*"([^"]+)"', team_fragment)
+                team_code_match = re.search(r'"code"\s*:\s*"([^"]+)"', team_fragment)
+                code = team_code_match.group(1) if team_code_match else (
+                    team_name.group(1) if team_name else ""
                 )
-            ]
+                if team_id and code:
+                    team_entries.append((team_id.group(1), team_code(code)))
+            team_ids = {}
+            for team_id, code in team_entries:
+                team_ids[team_id] = code
+                team_ids[team_id.rsplit(":", 1)[-1]] = code
+            game_markers = list(re.finditer(
+                r'"__typename"\s*:\s*"Game"',
+                chunk,
+            ))
+            games = []
+            for index, game_marker in enumerate(game_markers):
+                end = game_markers[index + 1].start() if index + 1 < len(game_markers) else len(chunk)
+                game_fragment = chunk[game_marker.start():end]
+                game_id = re.search(r'"id"\s*:\s*"(\d+)"', game_fragment)
+                state = re.search(r'"state"\s*:\s*"([^"]+)"', game_fragment)
+                number = re.search(r'"number"\s*:\s*(\d+)', game_fragment)
+                if game_id and state and number:
+                    games.append({
+                        "id": game_id.group(1),
+                        "number": int(number.group(1)),
+                        "state": state.group(1),
+                    })
             start = parse_start(start_match.group(1).replace("Z", "+0000"))
             local_date = start.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-            codes = tuple(sorted(team_code(code) for code in team_ids.values()))
+            codes = tuple(sorted(set(team_ids.values())))
             entry = {
                 "matchId": event_match.group(1),
                 "startTime": start.isoformat(),
@@ -202,11 +241,35 @@ def load_official_index():
             if competition_match:
                 entry["competition"] = competition_match.group(1)
             by_key[(local_date, codes)] = entry
+            by_date.setdefault(local_date, []).append(entry)
             by_id[entry["matchId"]] = entry
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"[LoL Esports] official schedule index unavailable: {error}")
-    OFFICIAL_CACHE.update({"expires": now + timedelta(minutes=10), "by_key": by_key, "by_id": by_id})
+    OFFICIAL_CACHE.update({
+        "expires": now + timedelta(minutes=10),
+        "by_key": by_key,
+        "by_date": by_date,
+        "by_id": by_id,
+    })
     return OFFICIAL_CACHE
+
+
+def find_official_match(official_index, date, codes):
+    index = official_index or {}
+    by_key = index.get("by_key", index) if isinstance(index, dict) else {}
+    normalized_codes = tuple(sorted(team_code(code) for code in codes))
+    official = by_key.get((date, normalized_codes))
+    if official:
+        return official
+    candidates = index.get("by_date", {}).get(date, []) if isinstance(index, dict) else []
+    wanted = set(normalized_codes)
+    return next(
+        (
+            candidate for candidate in candidates
+            if wanted == set(candidate.get("teamIds", {}).values())
+        ),
+        None,
+    )
 
 
 def parse_matches(league, page, html, official_index=None):
@@ -254,8 +317,10 @@ def parse_matches(league, page, html, official_index=None):
                 "competition": league,
             }
         source_competition = match["competition"]
-        official = (official_index or {}).get(
-            (date, tuple(sorted((match["blueCode"], match["redCode"]))))
+        official = find_official_match(
+            official_index,
+            date,
+            (match["blueCode"], match["redCode"]),
         )
         if official:
             match.update(official)
@@ -456,7 +521,7 @@ def load_matches():
     if CACHE["expires"] > now:
         return CACHE["matches"]
     matches = []
-    official_index = load_official_index()["by_key"]
+    official_index = load_official_index()
     stage_matches = {}
     pages = discover_stage_pages()
     source_pages = [(page, "LCK") for page in pages]
