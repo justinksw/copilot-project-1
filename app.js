@@ -2,6 +2,7 @@ const TIME_ZONE = "Asia/Hong_Kong";
 const REMOTE_API_URL = "https://justin-watch-api.onrender.com";
 const API_BASE_URL = window.NEXUS_API_BASE_URL
   || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
+const MATCH_TEAM = "T1";
 const HISTORY_KEY = "nexus-watch-match-history-v2";
 const BATCH_KEY = "nexus-watch-batches-v1";
 const TEAM_LOGOS = Object.freeze({
@@ -60,7 +61,7 @@ function renderTabs() {
 
 function renderMatches() {
   const range = tabRange(state.activeTab);
-  const visible = state.matches.filter((match) => match.date >= range.from && match.date <= range.to);
+  const visible = state.matches.filter((match) => match.date >= range.from && match.date <= range.to && isTeamMatch(match, MATCH_TEAM));
   $("#match-list").innerHTML = visible.map((match) => {
     const live = match.status === "live";
     const completed = match.status === "completed";
@@ -72,10 +73,10 @@ function renderMatches() {
       ${state.expandedMatchId === match.id ? `<section class="match-details">${renderMatchDetails(match)}</section>` : ""}
     </article>`;
   }).join("");
-  $("#match-heading").textContent = `${tabLabel(state.activeTab)} LCK matches`;
+  $("#match-heading").textContent = `${tabLabel(state.activeTab)} matches`;
   $("#empty-state").hidden = visible.length !== 0;
   if (!visible.length) {
-    $("#empty-state").textContent = `No LCK matches scheduled for ${tabLabel(state.activeTab).toLowerCase()} (${formatRange(range)}).`;
+    $("#empty-state").textContent = `No matches scheduled for ${tabLabel(state.activeTab).toLowerCase()} (${formatRange(range)}).`;
   }
   updateBatchStatus();
   renderTabs();
@@ -87,6 +88,12 @@ function teamMarkup(name, code, logo, score, dimScore) {
     ? `<img class="team-logo" src="${escapeHtml(logoSource)}" alt="${escapeHtml(name)} logo" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.classList.add('is-visible')" /><span class="team-logo logo-fallback">${escapeHtml(code)}</span>`
     : `<span class="team-logo">${escapeHtml(code)}</span>`;
   return `${logoMarkup}<strong class="team-name">${escapeHtml(name)}</strong><span class="team-score ${dimScore ? "dim" : ""}">${escapeHtml(score ?? "—")}</span>`;
+}
+
+function isTeamMatch(match, team) {
+  const wanted = team.toUpperCase();
+  return [match.blueCode, match.redCode, match.blue, match.red]
+    .some((value) => String(value || "").toUpperCase() === wanted);
 }
 
 function updateBatchStatus() {
@@ -185,7 +192,7 @@ async function fetchBatch(from, to) {
   if (state.loadingBatch || rangeContains(from) && rangeContains(to)) return;
   state.loadingBatch = true; updateBatchStatus();
   try {
-    const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${encodeURIComponent(MATCH_TEAM)}`;
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Schedule unavailable (${response.status})`);
     const payload = await response.json();
