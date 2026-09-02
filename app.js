@@ -127,7 +127,7 @@ function updateBatchStatus() {
     : state.scheduleStale
       ? "Showing cached schedule · refresh when online"
       : loadedRange
-        ? formatRange(loadedRange)
+        ? "Schedule ready"
         : "No schedule loaded";
   $("#updated").textContent = status;
 }
