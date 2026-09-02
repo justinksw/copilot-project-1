@@ -10,8 +10,9 @@ from urllib.request import Request, urlopen
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8080"))
 FANDOM_API = "https://lol.fandom.com/api.php"
-OFFICIAL_SCHEDULE_URL = "https://lolesports.com/en-US/leagues/lck"
+OFFICIAL_SCHEDULE_URL = "https://lolesports.com/en-US/schedule"
 FEED_API = "https://feed.lolesports.com/livestats/v1"
+TEAM_MATCH_HISTORY_PAGES = {"T1": "T1/Match_History"}
 CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "matches": [],
@@ -166,7 +167,7 @@ def load_official_index():
         html = fetch_official_schedule()
         chunks = re.split(r'(?=\{"__typename":"EventMatch","id":"\d+")', html)
         for chunk in chunks:
-            if '"__typename":"EventMatch"' not in chunk or '"slug":"lck"' not in chunk:
+            if '"__typename":"EventMatch"' not in chunk:
                 continue
             event_match = re.search(r'\{"__typename":"EventMatch","id":"(\d+)"', chunk)
             start_match = re.search(r'"startTime":"([^"]+)"', chunk)
@@ -447,16 +448,31 @@ def load_matches():
     official_index = load_official_index()["by_key"]
     stage_matches = {}
     pages = discover_stage_pages()
-    with ThreadPoolExecutor(max_workers=min(6, max(1, len(pages)))) as executor:
-        futures = {page: executor.submit(fetch_page, page) for page in pages}
-        for page, future in futures.items():
+    source_pages = [(page, "LCK") for page in pages]
+    source_pages.extend((page, team) for team, page in TEAM_MATCH_HISTORY_PAGES.items())
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(source_pages)))) as executor:
+        futures = {
+            (page, league): executor.submit(fetch_page, page)
+            for page, league in source_pages
+        }
+        for (page, league), future in futures.items():
             try:
-                parsed = parse_matches("LCK", page, future.result(), official_index)
-                stage_matches[page] = parsed
+                parsed = parse_matches(league, page, future.result(), official_index)
+                if league == "LCK":
+                    stage_matches[page] = parsed
                 matches.extend(parsed)
             except Exception as error:
                 print(f"[Leaguepedia] {page}: {error}")
-    matches = list({match["id"]: match for match in matches}.values())
+    deduped = {}
+    for match in matches:
+        key = (match["date"], tuple(sorted((match["blueCode"], match["redCode"]))))
+        current = deduped.get(key)
+        if current is None or (
+            current.get("league") == "T1"
+            and match.get("league") == "LCK"
+        ) or (not current.get("matchId") and match.get("matchId")):
+            deduped[key] = match
+    matches = list(deduped.values())
     active_page = select_active_stage(stage_matches)
     CACHE["stage"] = {
         "page": active_page,
@@ -534,7 +550,9 @@ def load_standings():
     now = datetime.now(timezone.utc)
     if STANDINGS_CACHE["expires"] > now:
         return STANDINGS_CACHE["rows"]
-    rows = build_standings(load_matches())
+    rows = build_standings(
+        match for match in load_matches() if match.get("league") == "LCK"
+    )
     STANDINGS_CACHE.update({"expires": now + timedelta(minutes=10), "rows": rows})
     return rows
 
