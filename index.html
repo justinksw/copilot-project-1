@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="A T1 League of Legends schedule, results, and LCK standings dashboard." />
-    <title>JUSTIN · T1 · WATCH</title>
+    <meta name="description" content="A League of Legends match schedule, results, and LCK standings dashboard." />
+    <title>JUSTIN · GAME · WATCH</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
@@ -13,7 +13,7 @@
   <body>
     <header class="topbar">
       <a class="brand" href="#">
-        <span class="brand-muted">JUSTIN</span> · T1 · <span class="brand-muted">WATCH</span>
+        <span class="brand-muted">JUSTIN</span> · GAME · <span class="brand-muted">WATCH</span>
       </a>
       <button class="refresh-button" id="refresh-button" type="button">
         <span class="refresh-icon">↻</span> Refresh
@@ -21,37 +21,22 @@
     </header>
 
     <main>
-      <section class="hero">
-        <div class="hero-title">
-          <div>
-            <h1>Follow <span>T1</span> in LCK</h1>
-            <div class="hero-subtitle"><span id="hero-stage">Stage loading…</span> · Match schedule and standings</div>
-          </div>
-        </div>
-      </section>
-
       <section class="toolbar" id="matches">
-        <div class="date-nav">
-          <button class="date-arrow" id="previous-day" type="button" aria-label="Previous day">←</button>
-          <div><span class="date-label" id="date-label">Today</span><strong id="date-value"></strong></div>
-          <button class="date-arrow" id="next-day" type="button" aria-label="Next day">→</button>
+        <div class="match-tabs" id="match-tabs" role="tablist" aria-label="LCK match schedule">
+          <button class="match-tab" id="tab-previous" type="button" role="tab" data-tab="previous" aria-selected="false" aria-controls="match-panel">Previous</button>
+          <button class="match-tab is-active" id="tab-today" type="button" role="tab" data-tab="today" aria-selected="true" aria-controls="match-panel">Today</button>
+          <button class="match-tab" id="tab-next" type="button" role="tab" data-tab="next" aria-selected="false" aria-controls="match-panel">Next</button>
         </div>
-      </section>
-
-      <section class="team-summary" aria-label="T1 summary">
-        <div><span class="summary-label">NEXT OPPONENT</span><strong id="next-opponent">Loading…</strong><small id="next-match">Loading schedule…</small></div>
-        <div><span class="summary-label">T1 SERIES RECORD</span><strong id="team-record">—</strong><small>Completed matches in loaded history</small></div>
-        <span class="batch-status" id="batch-status" aria-live="polite">Loading schedule…</span>
       </section>
 
       <div class="content-grid">
-        <section class="matches-panel">
+        <section class="matches-panel" id="match-panel" role="tabpanel" aria-labelledby="tab-today" tabindex="0">
           <div class="section-heading">
             <div><h2 id="match-heading">Today's matches</h2></div>
             <span class="updated" id="updated">Times shown in Hong Kong (UTC+8)</span>
           </div>
           <div class="match-list" id="match-list"></div>
-          <div class="empty-state" id="empty-state" hidden>No matches found for this date.</div>
+          <div class="empty-state" id="empty-state" hidden>No LCK matches found for this period.</div>
         </section>
         <aside class="standings-panel">
           <div class="section-heading"><div><h2>LCK leaderboard</h2></div><span class="updated">Series · Games</span></div>
@@ -60,7 +45,7 @@
       </div>
     </main>
 
-    <footer id="results"><span>© 2026 Justin LoL Watch</span><span>Built for fun · Debugging version</span></footer>
+    <footer id="results"><span>© 2026 Justin Game Watch</span><span>Built for fun · Debugging version</span></footer>
     <script src="app.js"></script>
   </body>
 </html>
