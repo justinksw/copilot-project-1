@@ -12,7 +12,7 @@ const TEAM_LOGOS = Object.freeze({
 });
 const state = {
   activeTab: "today", matches: [], expandedMatchId: null, details: new Map(),
-  detailLoading: new Set(), detailErrors: new Map(), standings: [], loadedDates: new Set(),
+  detailLoading: new Set(), detailErrors: new Map(), standings: [],
   ranges: [], loadingBatch: false, scheduleStale: false
 };
 
@@ -90,7 +90,7 @@ function teamMarkup(name, code, logo, score, dimScore) {
 }
 
 function updateBatchStatus() {
-  const status = state.loadingBatch ? "Loading more schedule days…" : state.scheduleStale ? "Showing cached schedule · refresh when online" : `${state.ranges.length} schedule batch${state.ranges.length === 1 ? "" : "es"} loaded`;
+  const status = state.loadingBatch ? "Loading schedule…" : state.scheduleStale ? "Showing cached schedule · refresh when online" : `${state.ranges.length} schedule batch${state.ranges.length === 1 ? "" : "es"} loaded`;
   $("#updated").textContent = status;
 }
 
@@ -173,7 +173,6 @@ function loadBatches() {
     if (saved?.matches) {
       state.matches = mergeMatches(saved.matches);
       state.ranges = saved.ranges || [];
-      state.matches.forEach((match) => state.loadedDates.add(match.date));
     }
   } catch (error) { console.warn("Stored schedule cache could not be read.", error); }
 }
@@ -191,7 +190,6 @@ async function fetchBatch(from, to) {
     if (!response.ok) throw new Error(`Schedule unavailable (${response.status})`);
     const payload = await response.json();
     state.matches = mergeMatches([...state.matches, ...(payload.matches || [])]);
-    for (let date = from; date <= to; date = shiftDate(date, 1)) state.loadedDates.add(date);
     state.ranges.push({ from, to }); state.ranges = state.ranges.slice(-12);
     state.scheduleStale = false;
     saveBatches();
@@ -212,7 +210,7 @@ async function loadStandings() {
 }
 
 async function refreshMatches() {
-  state.ranges = []; state.loadedDates.clear(); state.scheduleStale = false;
+  state.ranges = []; state.scheduleStale = false;
   const today = dateKey(new Date());
   const monday = mondayOfWeek(today);
   await fetchBatch(shiftDate(monday, -7), shiftDate(monday, 13));
@@ -224,6 +222,18 @@ $("#match-tabs").addEventListener("click", (event) => {
   if (!tab) return;
   state.activeTab = tab.dataset.tab;
   renderMatches();
+});
+$("#match-tabs").addEventListener("keydown", (event) => {
+  const tabs = [...document.querySelectorAll(".match-tab")];
+  const currentIndex = tabs.findIndex((tab) => tab.dataset.tab === state.activeTab);
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const nextIndex = event.key === "Home" ? 0
+    : event.key === "End" ? tabs.length - 1
+      : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  state.activeTab = tabs[nextIndex].dataset.tab;
+  renderMatches();
+  tabs[nextIndex].focus();
 });
 $("#refresh-button").addEventListener("click", refreshMatches);
 $("#match-list").addEventListener("click", (event) => {
