@@ -14,7 +14,7 @@ const TEAM_LOGOS = Object.freeze({
 const state = {
   activeTab: "today", matches: [], expandedMatchId: null, details: new Map(),
   detailLoading: new Set(), detailErrors: new Map(), standings: [], standingsMeta: {},
-  ranges: [], loadingBatch: false, scheduleStale: false
+  ranges: [], loadingBatch: false, scheduleStale: false, weekOffset: 0
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -35,8 +35,8 @@ function mondayOfWeek(key) {
 
 function tabRange(tab, today = dateKey(new Date())) {
   const monday = mondayOfWeek(today);
-  if (tab === "previous") return { from: shiftDate(monday, -7), to: shiftDate(monday, -1) };
-  if (tab === "next") return { from: shiftDate(monday, 7), to: shiftDate(monday, 13) };
+  if (tab === "previous") return { from: shiftDate(monday, (state.weekOffset - 1) * 7), to: shiftDate(monday, state.weekOffset * 7 - 1) };
+  if (tab === "next") return { from: shiftDate(monday, (state.weekOffset + 1) * 7), to: shiftDate(monday, (state.weekOffset + 2) * 7 - 1) };
   return { from: today, to: today };
 }
 
@@ -59,6 +59,9 @@ function sortMatches(matches) {
 
 function renderPeriodRange(range) {
   $("#period-range").textContent = formatRange(range);
+  const browsingWeek = state.activeTab !== "today";
+  $("#earlier-week").disabled = !browsingWeek || state.loadingBatch;
+  $("#later-week").disabled = !browsingWeek || state.loadingBatch;
 }
 
 function renderTabs() {
@@ -252,7 +255,7 @@ async function loadStandings() {
 }
 
 async function refreshMatches() {
-  state.ranges = []; state.scheduleStale = false;
+  state.ranges = []; state.scheduleStale = false; state.weekOffset = 0;
   const today = dateKey(new Date());
   const monday = mondayOfWeek(today);
   await fetchBatch(shiftDate(monday, -7), shiftDate(monday, 13));
@@ -263,6 +266,7 @@ $("#match-tabs").addEventListener("click", (event) => {
   const tab = event.target.closest(".match-tab");
   if (!tab) return;
   state.activeTab = tab.dataset.tab;
+  if (state.activeTab === "today") state.weekOffset = 0;
   renderMatches();
   const range = tabRange(state.activeTab);
   fetchBatch(range.from, range.to);
@@ -276,8 +280,25 @@ $("#match-tabs").addEventListener("keydown", (event) => {
     : event.key === "End" ? tabs.length - 1
       : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
   state.activeTab = tabs[nextIndex].dataset.tab;
+  if (state.activeTab === "today") state.weekOffset = 0;
   renderMatches();
   tabs[nextIndex].focus();
+  const range = tabRange(state.activeTab);
+  fetchBatch(range.from, range.to);
+});
+$("#earlier-week").addEventListener("click", () => {
+  if (state.activeTab === "today") return;
+  state.weekOffset -= 1;
+  state.expandedMatchId = null;
+  renderMatches();
+  const range = tabRange(state.activeTab);
+  fetchBatch(range.from, range.to);
+});
+$("#later-week").addEventListener("click", () => {
+  if (state.activeTab === "today") return;
+  state.weekOffset += 1;
+  state.expandedMatchId = null;
+  renderMatches();
   const range = tabRange(state.activeTab);
   fetchBatch(range.from, range.to);
 });

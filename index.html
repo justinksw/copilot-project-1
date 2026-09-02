@@ -33,6 +33,10 @@
         <section class="matches-panel" id="match-panel" role="tabpanel" aria-labelledby="tab-today" tabindex="0">
           <div class="section-heading">
             <div><h2 id="match-heading">Today's matches</h2><span class="period-range" id="period-range" aria-live="polite"></span></div>
+            <div class="period-navigation" aria-label="Browse match weeks">
+              <button class="period-button" id="earlier-week" type="button" aria-label="Show an earlier week">← Earlier</button>
+              <button class="period-button" id="later-week" type="button" aria-label="Show a later week">Later →</button>
+            </div>
           </div>
           <span class="updated match-updated" id="updated">Times shown in Hong Kong (UTC+8)</span>
           <div class="match-list" id="match-list"></div>
