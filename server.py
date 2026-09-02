@@ -24,6 +24,7 @@ LOGO_CACHE = {}
 STANDINGS_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "rows": [],
+    "competition": {"league": "LCK", "label": "LCK", "stage": ""},
 }
 DEFAULT_STAGE_SUFFIX = "Rounds_3-4"  # Only used when Leaguepedia is unavailable.
 HONG_KONG = timezone(timedelta(hours=8))
@@ -194,6 +195,12 @@ def load_official_index():
                 "gameIds": games,
                 "teamIds": team_ids,
             }
+            competition_match = re.search(
+                r'"(?:tournamentName|leagueName|eventName)":"([^"]+)"',
+                chunk,
+            )
+            if competition_match:
+                entry["competition"] = competition_match.group(1)
             by_key[(local_date, codes)] = entry
             by_id[entry["matchId"]] = entry
     except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -244,13 +251,17 @@ def parse_matches(league, page, html, official_index=None):
                 "series": "BO3",
                 "source": "Leaguepedia",
                 "link": f"https://lol.fandom.com/wiki/{quote(page)}",
+                "competition": league,
             }
+        source_competition = match["competition"]
         official = (official_index or {}).get(
             (date, tuple(sorted((match["blueCode"], match["redCode"]))))
         )
         if official:
             match.update(official)
             match["id"] = official["matchId"]
+            if source_competition == "LCK":
+               match["competition"] = source_competition
         match["teams"] = {
             "blue": {"name": match["blue"], "code": match["blueCode"], "logo": match["blueLogo"]},
             "red": {"name": match["red"], "code": match["redCode"], "logo": match["redLogo"]},
@@ -512,6 +523,46 @@ def team_matches(match, team):
                       match.get("blue", "").upper(), match.get("red", "").upper()}
 
 
+def competition_name(match):
+    return match.get("competition") or match.get("league")
+
+
+def select_competition(matches):
+    now = datetime.now(HONG_KONG)
+    candidates = [
+        match for match in matches
+        if team_matches(match, "T1")
+        and competition_name(match)
+        and competition_name(match) != "T1"
+    ]
+    live = [
+        match for match in candidates
+        if match.get("status") == "live"
+    ]
+    upcoming = [
+        match for match in candidates
+        if (start := match_start(match)) and start >= now and match.get("status") != "completed"
+    ]
+    past = [
+        match for match in candidates
+        if (start := match_start(match)) and start < now
+    ]
+    selected = (
+        min(live, key=lambda match: match_start(match))
+        if live else
+        min(upcoming, key=lambda match: match_start(match))
+        if upcoming else
+        max(past, key=lambda match: match_start(match), default=None)
+    )
+    if not selected:
+        return {"league": "LCK", "label": "LCK", "stage": ""}
+    return {
+        "league": competition_name(selected),
+        "label": competition_name(selected),
+        "stage": selected.get("stage", ""),
+    }
+
+
 def build_standings(matches):
     teams = {}
     for match in matches:
@@ -550,10 +601,21 @@ def load_standings():
     now = datetime.now(timezone.utc)
     if STANDINGS_CACHE["expires"] > now:
         return STANDINGS_CACHE["rows"]
+    matches = load_matches()
+    competition = select_competition(matches)
     rows = build_standings(
-        match for match in load_matches() if match.get("league") == "LCK"
+        match for match in matches if competition_name(match) == competition["league"]
     )
-    STANDINGS_CACHE.update({"expires": now + timedelta(minutes=10), "rows": rows})
+    if len(rows) < 4 and competition["league"] != "LCK":
+        competition = {"league": "LCK", "label": "LCK", "stage": CACHE["stage"]["label"]}
+        rows = build_standings(
+            match for match in matches if competition_name(match) == "LCK"
+        )
+    STANDINGS_CACHE.update({
+        "expires": now + timedelta(minutes=10),
+        "rows": rows,
+        "competition": competition,
+    })
     return rows
 
 
@@ -601,8 +663,9 @@ class Handler(SimpleHTTPRequestHandler):
         if path.path == "/api/standings":
             standings = load_standings()
             body = json.dumps({
-                "league": "LCK",
+                "league": STANDINGS_CACHE["competition"]["league"],
                 "season": CACHE["stage"]["year"],
+                "competition": STANDINGS_CACHE["competition"],
                 "standings": standings,
                 "cached": STANDINGS_CACHE["expires"].isoformat(),
             }).encode()

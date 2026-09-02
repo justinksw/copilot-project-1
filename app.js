@@ -13,8 +13,8 @@ const TEAM_LOGOS = Object.freeze({
 });
 const state = {
   activeTab: "today", matches: [], expandedMatchId: null, details: new Map(),
-  detailLoading: new Set(), detailErrors: new Map(), standings: [],
-  ranges: [], loadingBatch: false, scheduleStale: false
+  detailLoading: new Set(), detailErrors: new Map(), standings: [], standingsMeta: {},
+  ranges: [], loadingBatch: false, scheduleStale: false, weekOffset: 0
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -35,8 +35,8 @@ function mondayOfWeek(key) {
 
 function tabRange(tab, today = dateKey(new Date())) {
   const monday = mondayOfWeek(today);
-  if (tab === "previous") return { from: shiftDate(monday, -7), to: shiftDate(today, -1) };
-  if (tab === "next") return { from: shiftDate(today, 1), to: shiftDate(monday, 13) };
+  if (tab === "previous") return { from: shiftDate(monday, (state.weekOffset - 1) * 7), to: shiftDate(monday, state.weekOffset * 7 - 1) };
+  if (tab === "next") return { from: shiftDate(monday, (state.weekOffset + 1) * 7), to: shiftDate(monday, (state.weekOffset + 2) * 7 - 1) };
   return { from: today, to: today };
 }
 
@@ -47,6 +47,21 @@ function tabLabel(tab) {
 function formatRange(range) {
   const from = dateFormatter.format(dateFromKey(range.from));
   return range.from === range.to ? from : `${from} – ${dateFormatter.format(dateFromKey(range.to))}`;
+}
+
+function matchSortKey(match) {
+  return `${match.date || "9999-12-31"}T${match.time && match.time !== "—" ? match.time : "99:99"}`;
+}
+
+function sortMatches(matches) {
+  return [...matches].sort((a, b) => matchSortKey(a).localeCompare(matchSortKey(b)));
+}
+
+function renderPeriodNavigation(range) {
+  const browsingWeek = state.activeTab !== "today";
+  $("#period-range").textContent = formatRange(range);
+  $("#earlier-week").disabled = !browsingWeek || state.loadingBatch;
+  $("#later-week").disabled = !browsingWeek || state.loadingBatch;
 }
 
 function renderTabs() {
@@ -61,12 +76,12 @@ function renderTabs() {
 
 function renderMatches() {
   const range = tabRange(state.activeTab);
-  const visible = state.matches.filter((match) => match.date >= range.from && match.date <= range.to && isTeamMatch(match, MATCH_TEAM));
+  const visible = sortMatches(state.matches.filter((match) => match.date >= range.from && match.date <= range.to && isTeamMatch(match, MATCH_TEAM)));
   $("#match-list").innerHTML = visible.map((match) => {
     const live = match.status === "live";
     const completed = match.status === "completed";
     return `<article class="match-card ${state.expandedMatchId === match.id ? "is-expanded" : ""}" data-match-key="${escapeHtml(match.id)}" tabindex="0" aria-expanded="${state.expandedMatchId === match.id}">
-      <div class="match-meta"><strong>${escapeHtml(match.time)}</strong><span>${escapeHtml(match.league)}</span><span>${escapeHtml(match.stage)}</span></div>
+      <div class="match-meta"><time datetime="${escapeHtml(match.date)}">${escapeHtml(dateFormatter.format(dateFromKey(match.date)))}</time><strong>${escapeHtml(match.time)}</strong><span>${escapeHtml(match.league)}</span><span>${escapeHtml(match.stage)}</span></div>
       <div class="team-column team-one">${teamMarkup(match.blue, match.blueCode, match.blueLogo, match.blueScore, completed && match.blueScore < match.redScore)}</div>
       <div class="match-center"><span class="series">BEST OF ${escapeHtml(match.series.replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${match.blueScore ?? "—"} - ${match.redScore ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(match.status)}">${live ? "● Live" : escapeHtml(match.status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
       <div class="team-column team-two">${teamMarkup(match.red, match.redCode, match.redLogo, match.redScore, completed && match.redScore < match.blueScore)}</div>
@@ -78,6 +93,7 @@ function renderMatches() {
   if (!visible.length) {
     $("#empty-state").textContent = `No matches scheduled for ${tabLabel(state.activeTab).toLowerCase()} (${formatRange(range)}).`;
   }
+  renderPeriodNavigation(range);
   updateBatchStatus();
   renderTabs();
 }
@@ -102,6 +118,11 @@ function updateBatchStatus() {
 }
 
 function renderStandings() {
+  const competition = state.standingsMeta.label || state.standingsMeta.league || "Current competition";
+  $("#standings-heading").textContent = `${competition} leaderboard`;
+  $("#standings-context").textContent = state.standingsMeta.stage
+    ? `${state.standingsMeta.stage} · Series · Games`
+    : "Series · Games";
   $("#standings-list").innerHTML = state.standings.length
     ? state.standings.map((row) => `<li class="standing-row ${row.isFavorite ? "is-favorite" : ""}" ${row.isFavorite ? 'aria-current="true"' : ""}>
       <span class="standing-rank">${escapeHtml(row.rank)}</span>
@@ -164,7 +185,7 @@ async function loadMatchDetails(match) {
 function mergeMatches(matches) {
   const deduped = new Map();
   matches.filter(Boolean).forEach((match) => deduped.set(match.id || `${match.date}-${match.blue}-${match.red}`, match));
-  return [...deduped.values()].sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`));
+  return sortMatches([...deduped.values()]);
 }
 
 function saveBatches() {
@@ -209,15 +230,17 @@ async function fetchBatch(from, to) {
 
 async function loadStandings() {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/standings?league=LCK`);
+    const response = await fetch(`${API_BASE_URL}/api/standings`);
     if (!response.ok) throw new Error(`Standings unavailable (${response.status})`);
-    state.standings = (await response.json()).standings || [];
+    const payload = await response.json();
+    state.standings = payload.standings || [];
+    state.standingsMeta = payload.competition || { league: payload.league, season: payload.season };
   } catch (error) { console.warn(error); }
   renderStandings();
 }
 
 async function refreshMatches() {
-  state.ranges = []; state.scheduleStale = false;
+  state.ranges = []; state.scheduleStale = false; state.weekOffset = 0;
   const today = dateKey(new Date());
   const monday = mondayOfWeek(today);
   await fetchBatch(shiftDate(monday, -7), shiftDate(monday, 13));
@@ -228,7 +251,10 @@ $("#match-tabs").addEventListener("click", (event) => {
   const tab = event.target.closest(".match-tab");
   if (!tab) return;
   state.activeTab = tab.dataset.tab;
+  if (state.activeTab === "today") state.weekOffset = 0;
   renderMatches();
+  const range = tabRange(state.activeTab);
+  fetchBatch(range.from, range.to);
 });
 $("#match-tabs").addEventListener("keydown", (event) => {
   const tabs = [...document.querySelectorAll(".match-tab")];
@@ -239,8 +265,27 @@ $("#match-tabs").addEventListener("keydown", (event) => {
     : event.key === "End" ? tabs.length - 1
       : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
   state.activeTab = tabs[nextIndex].dataset.tab;
+  if (state.activeTab === "today") state.weekOffset = 0;
   renderMatches();
   tabs[nextIndex].focus();
+  const range = tabRange(state.activeTab);
+  fetchBatch(range.from, range.to);
+});
+$("#earlier-week").addEventListener("click", () => {
+  if (state.activeTab === "today") return;
+  state.weekOffset -= 1;
+  state.expandedMatchId = null;
+  renderMatches();
+  const range = tabRange(state.activeTab);
+  fetchBatch(range.from, range.to);
+});
+$("#later-week").addEventListener("click", () => {
+  if (state.activeTab === "today") return;
+  state.weekOffset += 1;
+  state.expandedMatchId = null;
+  renderMatches();
+  const range = tabRange(state.activeTab);
+  fetchBatch(range.from, range.to);
 });
 $("#refresh-button").addEventListener("click", refreshMatches);
 $("#match-list").addEventListener("click", (event) => {
