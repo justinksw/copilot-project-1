@@ -435,6 +435,7 @@ def load_matches():
                 matches.extend(parsed)
             except Exception as error:
                 print(f"[Leaguepedia] {page}: {error}")
+    matches = list({match["id"]: match for match in matches}.values())
     active_page = select_active_stage(stage_matches)
     CACHE["stage"] = {
         "page": active_page,
