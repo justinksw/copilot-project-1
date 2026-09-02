@@ -64,12 +64,6 @@ footer { border-top: 1px solid var(--line); color: var(--muted); display: flex; 
     row-gap: 6px;
   }
 
-  .team-summary { align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; display: flex; gap: 42px; justify-content: flex-start; padding: 18px 22px; }
-  .team-summary > div { display: grid; gap: 4px; min-width: 170px; }
-  .summary-label { color: var(--muted); font-size: 9px; letter-spacing: .12em; }
-  .team-summary strong { font-family: "Space Grotesk", sans-serif; font-size: 18px; }
-  .team-summary small { color: var(--muted); font-size: 10px; }
-  .batch-status { color: var(--muted); font-size: 10px; margin-left: auto; text-align: right; }
   .standings-panel { min-width: 0; }
   .standings-list { display: grid; gap: 7px; list-style: none; margin: 0; padding: 0; }
   .standing-row { align-items: center; background: var(--panel); border: 1px solid transparent; border-radius: 4px; display: grid; gap: 7px; grid-template-columns: 22px 27px minmax(0, 1fr) 38px 38px; padding: 9px 10px; }
@@ -82,8 +76,6 @@ footer { border-top: 1px solid var(--line); color: var(--muted); display: flex; 
   .standing-record { font-size: 11px; text-align: right; }
   .standing-record small { color: var(--muted); display: block; font-size: 8px; }
   @media (max-width: 760px) {
-    .team-summary { align-items: flex-start; flex-wrap: wrap; gap: 18px 28px; }
-    .batch-status { margin-left: 0; text-align: left; width: 100%; }
     .standings-panel { margin-top: 30px; }
   }
   .player-identity { grid-area: identity; }
