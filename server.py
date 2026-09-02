@@ -26,11 +26,32 @@ STANDINGS_CACHE = {
 }
 DEFAULT_STAGE_SUFFIX = "Rounds_3-4"  # Only used when Leaguepedia is unavailable.
 HONG_KONG = timezone(timedelta(hours=8))
+TEAM_CODE_ALIASES = {
+    "BNKFEARX": "BFX",
+    "BNKFEAR": "BFX",
+    "DPLUSKIA": "DK",
+    "DPLUS": "DK",
+    "DNFREECS": "DNS",
+    "DNF": "DNS",
+    "GENG": "GEN",
+    "HANWHALIFEESPORTS": "HLE",
+    "HANWHA": "HLE",
+    "KTROLSTER": "KT",
+    "NONGSHIMREDFORCE": "NS",
+    "NONGSHIM": "NS",
+    "OKSAVINGSBANKBRION": "BRO",
+    "BRION": "BRO",
+}
 STAGE_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "pages": [],
     "season_year": None,
 }
+
+
+def team_code(name):
+    normalized = re.sub(r"[^A-Z0-9]", "", name.upper())
+    return TEAM_CODE_ALIASES.get(normalized, normalized[:3])
 
 
 def fetch_page(page):
@@ -165,7 +186,7 @@ def load_official_index():
             ]
             start = parse_start(start_match.group(1).replace("Z", "+0000"))
             local_date = start.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-            codes = tuple(sorted(code for code in team_ids.values()))
+            codes = tuple(sorted(team_code(code) for code in team_ids.values()))
             entry = {
                 "matchId": event_match.group(1),
                 "startTime": start.isoformat(),
@@ -213,8 +234,8 @@ def parse_matches(league, page, html, official_index=None):
                 "stage": page.split("/")[-1].replace("_", " "),
                 "blue": teams[0].strip(),
                 "red": teams[1].strip(),
-                "blueCode": teams[0].strip()[:3].upper(),
-                "redCode": teams[1].strip()[:3].upper(),
+                "blueCode": team_code(teams[0].strip()),
+                "redCode": team_code(teams[1].strip()),
                 "blueLogo": extract_logo(team_cells[0]) if len(team_cells) > 0 else None,
                 "redLogo": extract_logo(team_cells[1]) if len(team_cells) > 1 else None,
                 "blueScore": int(scores[0]) if len(scores) >= 1 else None,
@@ -224,7 +245,7 @@ def parse_matches(league, page, html, official_index=None):
                 "link": f"https://lol.fandom.com/wiki/{quote(page)}",
             }
         official = (official_index or {}).get(
-            (date, tuple(sorted((teams[0].strip()[:3].upper(), teams[1].strip()[:3].upper()))))
+            (date, tuple(sorted((match["blueCode"], match["redCode"]))))
         )
         if official:
             match.update(official)
@@ -380,7 +401,7 @@ def load_game_details(match_id):
         raise ValueError("Match details are not linked for this card")
     games = []
     for game in match["gameIds"]:
-        if game["state"] not in {"completed", "inProgress", "in_progress", "live"}:
+        if game["state"] not in {"completed", "finished", "inProgress", "in_progress", "live"}:
             continue
         detail = None
         window = None
