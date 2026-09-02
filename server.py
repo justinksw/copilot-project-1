@@ -253,12 +253,15 @@ def parse_matches(league, page, html, official_index=None):
                 "link": f"https://lol.fandom.com/wiki/{quote(page)}",
                 "competition": league,
             }
+        source_competition = match["competition"]
         official = (official_index or {}).get(
             (date, tuple(sorted((match["blueCode"], match["redCode"]))))
         )
         if official:
             match.update(official)
             match["id"] = official["matchId"]
+            if source_competition == "LCK":
+               match["competition"] = source_competition
         match["teams"] = {
             "blue": {"name": match["blue"], "code": match["blueCode"], "logo": match["blueLogo"]},
             "red": {"name": match["red"], "code": match["redCode"], "logo": match["redLogo"]},
@@ -520,13 +523,17 @@ def team_matches(match, team):
                       match.get("blue", "").upper(), match.get("red", "").upper()}
 
 
+def competition_name(match):
+    return match.get("competition") or match.get("league")
+
+
 def select_competition(matches):
     now = datetime.now(HONG_KONG)
     candidates = [
         match for match in matches
         if team_matches(match, "T1")
-        and match.get("competition")
-        and match.get("competition") != "T1"
+        and competition_name(match)
+        and competition_name(match) != "T1"
     ]
     live = [
         match for match in candidates
@@ -550,8 +557,8 @@ def select_competition(matches):
     if not selected:
         return {"league": "LCK", "label": "LCK", "stage": ""}
     return {
-        "league": selected["competition"],
-        "label": selected["competition"],
+        "league": competition_name(selected),
+        "label": competition_name(selected),
         "stage": selected.get("stage", ""),
     }
 
@@ -597,12 +604,12 @@ def load_standings():
     matches = load_matches()
     competition = select_competition(matches)
     rows = build_standings(
-        match for match in matches if match.get("competition") == competition["league"]
+        match for match in matches if competition_name(match) == competition["league"]
     )
     if len(rows) < 4 and competition["league"] != "LCK":
         competition = {"league": "LCK", "label": "LCK", "stage": CACHE["stage"]["label"]}
         rows = build_standings(
-            match for match in matches if match.get("competition") == "LCK"
+            match for match in matches if competition_name(match) == "LCK"
         )
     STANDINGS_CACHE.update({
         "expires": now + timedelta(minutes=10),
