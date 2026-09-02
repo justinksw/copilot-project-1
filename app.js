@@ -2,7 +2,6 @@ const TIME_ZONE = "Asia/Hong_Kong";
 const REMOTE_API_URL = "https://justin-watch-api.onrender.com";
 const API_BASE_URL = window.NEXUS_API_BASE_URL
   || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
-const FAVORITE_TEAM = "T1";
 const HISTORY_KEY = "nexus-watch-match-history-v2";
 const BATCH_KEY = "nexus-watch-batches-v1";
 const TEAM_LOGOS = Object.freeze({
@@ -12,8 +11,8 @@ const TEAM_LOGOS = Object.freeze({
   T1: "assets/team-logos/T1.png"
 });
 const state = {
-  dateOffset: 0, matches: [], expandedMatchId: null, details: new Map(),
-  detailLoading: new Set(), detailErrors: new Map(), standings: [], loadedDates: new Set(),
+  activeTab: "today", matches: [], expandedMatchId: null, details: new Map(),
+  detailLoading: new Set(), detailErrors: new Map(), standings: [],
   ranges: [], loadingBatch: false, scheduleStale: false
 };
 
@@ -21,16 +20,47 @@ const $ = (selector) => document.querySelector(selector);
 const dateFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: TIME_ZONE });
 const timeFormatter = new Intl.DateTimeFormat("en-HK", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TIME_ZONE });
 const dateKey = (date) => new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: TIME_ZONE }).format(date);
-const selectedDate = () => dateKey(new Date(Date.now() + state.dateOffset * 86400000));
-const formattedDate = () => dateFormatter.format(new Date(Date.now() + state.dateOffset * 86400000));
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
 }[character]));
 const dateFromKey = (key) => new Date(`${key}T00:00:00+08:00`);
 const shiftDate = (key, days) => dateKey(new Date(dateFromKey(key).getTime() + days * 86400000));
 
+function mondayOfWeek(key) {
+  const midday = new Date(`${key}T12:00:00+08:00`);
+  const day = midday.getUTCDay();
+  return shiftDate(key, -(day === 0 ? 6 : day - 1));
+}
+
+function tabRange(tab, today = dateKey(new Date())) {
+  const monday = mondayOfWeek(today);
+  if (tab === "previous") return { from: shiftDate(monday, -7), to: shiftDate(today, -1) };
+  if (tab === "next") return { from: shiftDate(today, 1), to: shiftDate(monday, 13) };
+  return { from: today, to: today };
+}
+
+function tabLabel(tab) {
+  return tab === "previous" ? "Previous" : tab === "next" ? "Next" : "Today";
+}
+
+function formatRange(range) {
+  const from = dateFormatter.format(dateFromKey(range.from));
+  return range.from === range.to ? from : `${from} – ${dateFormatter.format(dateFromKey(range.to))}`;
+}
+
+function renderTabs() {
+  document.querySelectorAll(".match-tab").forEach((tab) => {
+    const active = tab.dataset.tab === state.activeTab;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  $("#match-panel").setAttribute("aria-labelledby", `tab-${state.activeTab}`);
+}
+
 function renderMatches() {
-  const visible = state.matches.filter((match) => match.date === selectedDate());
+  const range = tabRange(state.activeTab);
+  const visible = state.matches.filter((match) => match.date >= range.from && match.date <= range.to);
   $("#match-list").innerHTML = visible.map((match) => {
     const live = match.status === "live";
     const completed = match.status === "completed";
@@ -42,17 +72,13 @@ function renderMatches() {
       ${state.expandedMatchId === match.id ? `<section class="match-details">${renderMatchDetails(match)}</section>` : ""}
     </article>`;
   }).join("");
+  $("#match-heading").textContent = `${tabLabel(state.activeTab)} LCK matches`;
   $("#empty-state").hidden = visible.length !== 0;
   if (!visible.length) {
-    const dates = [...state.loadedDates].sort();
-    const nextDate = dates.find((date) => date > selectedDate());
-    const previousDate = [...dates].reverse().find((date) => date < selectedDate());
-    const adjacent = nextDate ? `Next loaded match day: ${dateFormatter.format(dateFromKey(nextDate))}.`
-      : previousDate ? `Previous loaded match day: ${dateFormatter.format(dateFromKey(previousDate))}.` : "Load another date range.";
-    $("#empty-state").textContent = `No T1 matches scheduled for ${formattedDate()}. ${adjacent}`;
+    $("#empty-state").textContent = `No LCK matches scheduled for ${tabLabel(state.activeTab).toLowerCase()} (${formatRange(range)}).`;
   }
-  updateSummary();
   updateBatchStatus();
+  renderTabs();
 }
 
 function teamMarkup(name, code, logo, score, dimScore) {
@@ -63,23 +89,8 @@ function teamMarkup(name, code, logo, score, dimScore) {
   return `${logoMarkup}<strong class="team-name">${escapeHtml(name)}</strong><span class="team-score ${dimScore ? "dim" : ""}">${escapeHtml(score ?? "—")}</span>`;
 }
 
-function updateSummary() {
-  const now = Date.now();
-  const upcoming = state.matches.filter((match) => match.status !== "completed" && Date.parse(`${match.date}T${match.time}:00+08:00`) >= now)
-    .sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`))[0];
-  $("#next-opponent").textContent = upcoming ? teamName(upcoming, FAVORITE_TEAM === upcoming.blueCode ? upcoming.redCode : upcoming.blueCode) : "No upcoming match";
-  $("#next-match").textContent = upcoming ? `${dateFormatter.format(dateFromKey(upcoming.date))} · ${upcoming.time} HKT` : "Schedule unavailable";
-  const wins = state.matches.filter((match) => match.status === "completed" && favoriteScore(match) > opponentScore(match)).length;
-  const losses = state.matches.filter((match) => match.status === "completed" && favoriteScore(match) < opponentScore(match)).length;
-  $("#team-record").textContent = `${wins}-${losses}`;
-}
-
-function favoriteScore(match) { return match.blueCode === FAVORITE_TEAM ? match.blueScore : match.redScore; }
-function opponentScore(match) { return match.blueCode === FAVORITE_TEAM ? match.redScore : match.blueScore; }
-
 function updateBatchStatus() {
-  const status = state.loadingBatch ? "Loading more schedule days…" : state.scheduleStale ? "Showing cached schedule · refresh when online" : `${state.ranges.length} schedule batch${state.ranges.length === 1 ? "" : "es"} loaded`;
-  $("#batch-status").textContent = status;
+  const status = state.loadingBatch ? "Loading schedule…" : state.scheduleStale ? "Showing cached schedule · refresh when online" : `${state.ranges.length} schedule batch${state.ranges.length === 1 ? "" : "es"} loaded`;
   $("#updated").textContent = status;
 }
 
@@ -143,12 +154,6 @@ async function loadMatchDetails(match) {
   }
 }
 
-function updateDate() {
-  $("#date-value").textContent = formattedDate();
-  $("#date-label").textContent = state.dateOffset === 0 ? "Today" : state.dateOffset < 0 ? "Previous day" : "Next day";
-  $("#match-heading").textContent = state.dateOffset === 0 ? "T1 matches today" : `T1 matches · ${formattedDate()}`;
-}
-
 function mergeMatches(matches) {
   const deduped = new Map();
   matches.filter(Boolean).forEach((match) => deduped.set(match.id || `${match.date}-${match.blue}-${match.red}`, match));
@@ -168,7 +173,6 @@ function loadBatches() {
     if (saved?.matches) {
       state.matches = mergeMatches(saved.matches);
       state.ranges = saved.ranges || [];
-      state.matches.forEach((match) => state.loadedDates.add(match.date));
     }
   } catch (error) { console.warn("Stored schedule cache could not be read.", error); }
 }
@@ -181,20 +185,18 @@ async function fetchBatch(from, to) {
   if (state.loadingBatch || rangeContains(from) && rangeContains(to)) return;
   state.loadingBatch = true; updateBatchStatus();
   try {
-    const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${FAVORITE_TEAM}`;
+    const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Schedule unavailable (${response.status})`);
     const payload = await response.json();
     state.matches = mergeMatches([...state.matches, ...(payload.matches || [])]);
-    for (let date = from; date <= to; date = shiftDate(date, 1)) state.loadedDates.add(date);
     state.ranges.push({ from, to }); state.ranges = state.ranges.slice(-12);
     state.scheduleStale = false;
-    if (payload.stage?.label) $("#hero-stage").textContent = `${payload.stage.year} ${payload.stage.label.replace("Season ", "")}`;
     saveBatches();
   } catch (error) {
     console.warn(error); state.scheduleStale = true;
   } finally {
-    state.loadingBatch = false; updateDate(); renderMatches();
+    state.loadingBatch = false; renderMatches();
   }
 }
 
@@ -208,23 +210,31 @@ async function loadStandings() {
 }
 
 async function refreshMatches() {
-  state.ranges = []; state.loadedDates.clear(); state.scheduleStale = false;
-  const today = selectedDate();
-  await fetchBatch(shiftDate(today, -1), shiftDate(today, 1));
+  state.ranges = []; state.scheduleStale = false;
+  const today = dateKey(new Date());
+  const monday = mondayOfWeek(today);
+  await fetchBatch(shiftDate(monday, -7), shiftDate(monday, 13));
   loadStandings();
 }
 
-async function moveToMatchDay(direction) {
-  const current = selectedDate();
-  let target = shiftDate(current, direction);
-  state.dateOffset += (Date.parse(`${target}T00:00:00+08:00`) - Date.parse(`${current}T00:00:00+08:00`)) / 86400000;
-  updateDate();
-  if (!rangeContains(target)) await fetchBatch(shiftDate(target, -1), shiftDate(target, 1));
+$("#match-tabs").addEventListener("click", (event) => {
+  const tab = event.target.closest(".match-tab");
+  if (!tab) return;
+  state.activeTab = tab.dataset.tab;
   renderMatches();
-}
-
-$("#previous-day").addEventListener("click", () => moveToMatchDay(-1));
-$("#next-day").addEventListener("click", () => moveToMatchDay(1));
+});
+$("#match-tabs").addEventListener("keydown", (event) => {
+  const tabs = [...document.querySelectorAll(".match-tab")];
+  const currentIndex = tabs.findIndex((tab) => tab.dataset.tab === state.activeTab);
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const nextIndex = event.key === "Home" ? 0
+    : event.key === "End" ? tabs.length - 1
+      : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  state.activeTab = tabs[nextIndex].dataset.tab;
+  renderMatches();
+  tabs[nextIndex].focus();
+});
 $("#refresh-button").addEventListener("click", refreshMatches);
 $("#match-list").addEventListener("click", (event) => {
   const card = event.target.closest(".match-card");
@@ -237,7 +247,6 @@ $("#match-list").addEventListener("click", (event) => {
 });
 
 loadBatches();
-updateDate();
 renderMatches();
 renderStandings();
 refreshMatches();
