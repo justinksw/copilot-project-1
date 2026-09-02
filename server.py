@@ -201,11 +201,14 @@ def parse_matches(league, page, html, official_index=None):
         start = parse_start(start_match.group(1)) if start_match else None
         date = start.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d") if start else fallback_date
         time = start.astimezone(timezone(timedelta(hours=8))).strftime("%H:%M") if start else "—"
+        status = "completed" if len(scores) >= 2 else (
+            "live" if re.search(r"\blive\b|\bin[- ]progress\b", row, re.IGNORECASE) else "upcoming"
+        )
         match = {
                 "id": f"{page}:{fallback_date}:{teams[0]}:{teams[1]}",
                 "date": date,
                 "time": time,
-                "status": "completed" if len(scores) >= 2 else "upcoming",
+                "status": status,
                 "league": league,
                 "stage": page.split("/")[-1].replace("_", " "),
                 "blue": teams[0].strip(),
@@ -226,6 +229,10 @@ def parse_matches(league, page, html, official_index=None):
         if official:
             match.update(official)
             match["id"] = official["matchId"]
+        match["teams"] = {
+            "blue": {"name": match["blue"], "code": match["blueCode"], "logo": match["blueLogo"]},
+            "red": {"name": match["red"], "code": match["redCode"], "logo": match["redLogo"]},
+        }
         matches.append(match)
     return matches
 
@@ -552,10 +559,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path.path == "/api/standings":
+            standings = load_standings()
             body = json.dumps({
                 "league": "LCK",
                 "season": CACHE["stage"]["year"],
-                "standings": load_standings(),
+                "standings": standings,
                 "cached": STANDINGS_CACHE["expires"].isoformat(),
             }).encode()
             self.send_response(200)
@@ -569,8 +577,9 @@ class Handler(SimpleHTTPRequestHandler):
         if path.path != "/api/matches":
             return super().do_GET()
         matches = load_matches()
-        start, end = requested_range(parse_qs(path.query))
-        team = parse_qs(path.query).get("team", [None])[0]
+        query = parse_qs(path.query)
+        start, end = requested_range(query)
+        team = query.get("team", [None])[0]
         result = [
             match for match in matches
             if start <= (normalize_date(match.get("date")) or start) <= end and team_matches(match, team)

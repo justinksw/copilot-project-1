@@ -49,7 +49,7 @@ h1 span { color: var(--accent); }
 .date-nav { align-items: center; display: flex; gap: 14px; }.date-nav strong { display: block; font-size: 13px; margin-top: 3px; }
 .date-label { color: var(--muted); font-size: 11px; }.date-arrow, .icon-button { background: none; border: 0; color: var(--muted); font-size: 20px; padding: 0 4px; }
 .count { background: var(--orange); border-radius: 9px; color: #17191e; font-size: 9px; margin-left: 3px; padding: 2px 5px; }
-.content-grid { display: grid; grid-template-columns: minmax(0, 1fr); padding-top: 30px; }
+.content-grid { display: grid; gap: 28px; grid-template-columns: minmax(0, 1fr) 320px; padding-top: 30px; }
 .section-heading, .side-heading { align-items: flex-end; display: flex; justify-content: space-between; margin-bottom: 18px; }.section-heading h2, .side-heading h2 { font-size: 24px; letter-spacing: -.04em; }.updated { color: var(--muted); font-size: 10px; }
 .match-list { display: grid; gap: 8px; }.match-card { align-items: center; background: var(--panel); border: 1px solid transparent; border-radius: 5px; display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) 140px minmax(0, 1fr); min-height: 270px; padding: 18px 24px; transition: border-color .2s, transform .2s; }.match-card:hover { border-color: #454a58; transform: translateY(-2px); }
 .match-meta { align-items: center; border-bottom: 1px solid var(--line); display: flex; font-size: 11px; gap: 10px; grid-column: 1 / -1; justify-content: center; line-height: 1.5; padding-bottom: 13px; }.match-meta strong { color: var(--ink); font-size: 14px; }.match-meta span { color: var(--muted); }.status { color: var(--accent); font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }.status.upcoming { color: var(--blue); }.status.completed { color: var(--muted); }
@@ -73,6 +73,29 @@ footer { border-top: 1px solid var(--line); color: var(--muted); display: flex; 
     min-height: 0;
     padding: 8px 0;
     row-gap: 6px;
+  }
+
+  .team-summary { align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; display: flex; gap: 42px; justify-content: flex-start; padding: 18px 22px; }
+  .team-summary > div { display: grid; gap: 4px; min-width: 170px; }
+  .summary-label { color: var(--muted); font-size: 9px; letter-spacing: .12em; }
+  .team-summary strong { font-family: "Space Grotesk", sans-serif; font-size: 18px; }
+  .team-summary small { color: var(--muted); font-size: 10px; }
+  .batch-status { color: var(--muted); font-size: 10px; margin-left: auto; text-align: right; }
+  .standings-panel { min-width: 0; }
+  .standings-list { display: grid; gap: 7px; list-style: none; margin: 0; padding: 0; }
+  .standing-row { align-items: center; background: var(--panel); border: 1px solid transparent; border-radius: 4px; display: grid; gap: 7px; grid-template-columns: 22px 27px minmax(0, 1fr) 38px 38px; padding: 9px 10px; }
+  .standing-row.is-favorite { background: #24281c; border-color: var(--accent); }
+  .standing-rank { color: var(--muted); font-family: "Space Grotesk", sans-serif; font-size: 12px; text-align: center; }
+  .standing-row .team-column { display: contents; }
+  .standing-row .team-logo { flex: 0 0 auto; grid-column: 2; height: 27px; width: 27px; }
+  .standing-row .team-name { grid-column: 3; font-size: 11px; }
+  .standing-row .team-score { display: none; }
+  .standing-record { font-size: 11px; text-align: right; }
+  .standing-record small { color: var(--muted); display: block; font-size: 8px; }
+  @media (max-width: 760px) {
+    .team-summary { align-items: flex-start; flex-wrap: wrap; gap: 18px 28px; }
+    .batch-status { margin-left: 0; text-align: left; width: 100%; }
+    .standings-panel { margin-top: 30px; }
   }
   .player-identity { grid-area: identity; }
   .player-kda { grid-area: kda; padding-top: 5px; white-space: nowrap; }
