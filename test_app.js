@@ -36,6 +36,16 @@ assert.strictEqual(context.canonicalTeamCode("Gen.G"), "GEN");
 assert.strictEqual(context.isTeamMatch(match, "T1"), true);
 assert.strictEqual(context.matchStatus({ status: "upcoming", blueScore: 2, redScore: 3 }), "completed");
 assert.strictEqual(context.matchStatus({ status: "live", blueScore: null, redScore: null }), "live");
+assert.strictEqual(context.matchStatus({
+  status: "completed", blue: "T1", red: "TBD", blueScore: 8, redScore: 0
+}), "upcoming");
+assert.strictEqual(context.matchStatus({
+  status: "completed", blueCode: "WIN", blue: "Winner of semifinal 1",
+  red: "T1", blueScore: 2, redScore: 1
+}), "upcoming");
+assert.strictEqual(context.validMatchScore({
+  blue: "T1", red: "Gen.G", blueScore: 2, redScore: 1
+}), true);
 assert.strictEqual(JSON.stringify(context.calculateTabRange("previous", "2026-09-03")), JSON.stringify({
   from: "2026-08-24",
   to: "2026-09-02"
@@ -60,6 +70,10 @@ assert.strictEqual(context.mergeMatches([
   match,
   { ...match, id: "different-stale-id", matchId: undefined }
 ]).length, 1);
+assert.strictEqual(context.mergeMatches([
+  { ...match, matchId: undefined },
+  match
+])[0].matchId, "42");
 assert.strictEqual(context.mergeMatches([
   match,
   { ...match, id: "rematch", matchId: "43", time: "16:00" }

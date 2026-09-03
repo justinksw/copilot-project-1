@@ -99,6 +99,64 @@ class ScheduleTests(unittest.TestCase):
             "event-hle",
         )
 
+    def test_official_index_tolerates_key_order_and_skips_bad_event(self):
+        valid = official_fragment("valid")
+        reordered = {
+            "id": valid["id"],
+            "startTime": valid["startTime"],
+            "__typename": valid["__typename"],
+            "teams": valid["teams"],
+            "games": valid["games"],
+        }
+        malformed = {
+            "__typename": "EventMatch",
+            "id": "bad",
+            "startTime": "not-a-date",
+            "teams": valid["teams"],
+        }
+        with patch.object(
+            server, "fetch_official_schedule",
+            return_value=json.dumps(malformed) + json.dumps(reordered),
+        ):
+            server.OFFICIAL_CACHE["expires"] = server.datetime.min.replace(
+                tzinfo=server.timezone.utc
+            )
+            index = server.load_official_index()
+        self.assertEqual(set(index["by_id"]), {"valid"})
+        self.assertEqual(index["diagnostics"]["skipped"], 1)
+
+    def test_parse_matches_links_official_game_ids(self):
+        official = official_fragment("42")
+        index = {
+            "by_key": {
+                ("2026-08-30", ("GEN", "T1")): [{
+                    "matchId": "42",
+                    "startTime": "2026-08-30T04:00:00+00:00",
+                    "teamIds": {"team:1": "T1", "team:2": "GEN"},
+                    "gameIds": official["games"],
+                }],
+            },
+            "by_date": {},
+        }
+        parsed = server.parse_matches(
+            "LCK", "LCK/2026_Season/Stage",
+            leaguepedia_row("T1", "Gen.G", 2, 1), index,
+        )
+        self.assertEqual(parsed[0]["matchId"], "42")
+        self.assertEqual(parsed[0]["gameIds"][0]["id"], "1001")
+        self.assertEqual(parsed[0]["officialLinkStatus"], "linked")
+
+    def test_unresolved_opponent_cannot_have_a_completed_placeholder_score(self):
+        parsed = server.parse_matches(
+            "LCK", "LCK/2026_Season/Stage",
+            leaguepedia_row("T1", "TBD", 8, 0),
+        )
+        self.assertEqual(
+            (parsed[0]["blueScore"], parsed[0]["redScore"], parsed[0]["status"]),
+            (None, None, "upcoming"),
+        )
+        self.assertTrue(server.is_unresolved_opponent("Winner of semifinal 1"))
+
     def test_ambiguous_same_day_pair_is_not_linked(self):
         first = official_fragment("42")
         second = official_fragment("43")
