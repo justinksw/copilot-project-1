@@ -1,4 +1,5 @@
 import json
+import html as html_module
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -29,8 +30,10 @@ STANDINGS_CACHE = {
 DEFAULT_STAGE_SUFFIX = "Rounds_3-4"  # Only used when Leaguepedia is unavailable.
 HONG_KONG = timezone(timedelta(hours=8))
 TEAM_CODE_ALIASES = {
+    "BILIBILI": "BLG",
     "BNKFEARX": "BFX",
     "BNKFEAR": "BFX",
+    "FEARX": "BFX",
     "DPLUSKIA": "DK",
     "DPLUS": "DK",
     "DNFREECS": "DNS",
@@ -43,6 +46,7 @@ TEAM_CODE_ALIASES = {
     "NONGSHIM": "NS",
     "OKSAVINGSBANKBRION": "BRO",
     "BRION": "BRO",
+    "T1ESPORTS": "T1",
 }
 STAGE_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
@@ -130,6 +134,85 @@ def match_start(match):
         return None
 
 
+def match_fallback_identity(match):
+    codes = tuple(sorted({
+        team_code(match.get("blueCode") or match.get("blue", "")),
+        team_code(match.get("redCode") or match.get("red", "")),
+    }))
+    return (
+        "fallback",
+        match.get("date", ""),
+        codes,
+        match.get("competition") or match.get("league") or "",
+        match.get("time") or "—",
+    )
+
+
+def match_identity_keys(match):
+    keys = []
+    if match.get("matchId"):
+        keys.append(("official", str(match["matchId"])))
+    keys.append(match_fallback_identity(match))
+    return keys
+
+
+def match_identity(match):
+    return match_identity_keys(match)[0]
+
+
+def record_quality(match):
+    return (
+        bool(match.get("matchId")),
+        match.get("blueScore") is not None and match.get("redScore") is not None,
+        match.get("status") == "completed",
+        match.get("time") not in (None, "", "—"),
+        len(match.get("gameIds") or []),
+        match.get("league") == "LCK",
+    )
+
+
+def merge_match_record(existing, incoming):
+    preferred, fallback = (
+        (incoming, existing)
+        if record_quality(incoming) > record_quality(existing)
+        else (existing, incoming)
+    )
+    merged = dict(preferred)
+    for key, value in fallback.items():
+        if value in (None, "", "—", []):
+            continue
+        if merged.get(key) in (None, "", "—", []):
+            merged[key] = value
+    if preferred.get("matchId") and not merged.get("matchId"):
+        merged["matchId"] = preferred["matchId"]
+    return merged
+
+
+def merge_match_records(records):
+    merged = []
+    indexes = {}
+    for record in records:
+        if not record:
+            continue
+        existing_index = next(
+            (indexes[key] for key in match_identity_keys(record) if key in indexes),
+            None,
+        )
+        if existing_index is None:
+            existing_index = len(merged)
+            merged.append(record)
+        else:
+            merged[existing_index] = merge_match_record(
+                merged[existing_index], record
+            )
+        for key in match_identity_keys(merged[existing_index]):
+            indexes[key] = existing_index
+    return sorted(merged, key=lambda match: (
+        match.get("date", "9999-12-31"),
+        match.get("time") if match.get("time") not in (None, "—") else "99:99",
+    ))
+
+
 def select_active_stage(stage_matches):
     now_hong_kong = datetime.now(HONG_KONG)
     upcoming = []
@@ -180,6 +263,7 @@ def load_official_index():
             html[start:end]
             for start, end in zip(starts, starts[1:] + [len(html)])
         ]
+        entries_by_id = {}
         for chunk in chunks:
             event_match = re.search(
                 r'\{\s*"__typename"\s*:\s*"EventMatch"\s*,\s*"id"\s*:\s*"(\d+)"',
@@ -192,7 +276,7 @@ def load_official_index():
                 r'"__typename"\s*:\s*"MatchTeam"',
                 chunk,
             ))
-            team_entries = []
+            team_entries = {}
             for index, team_marker in enumerate(team_markers):
                 end = team_markers[index + 1].start() if index + 1 < len(team_markers) else len(chunk)
                 team_fragment = chunk[team_marker.start():end]
@@ -203,9 +287,11 @@ def load_official_index():
                     team_name.group(1) if team_name else ""
                 )
                 if team_id and code:
-                    team_entries.append((team_id.group(1), team_code(code)))
+                    team_entries[team_id.group(1)] = team_code(code)
+            if len(set(team_entries.values())) != 2:
+                continue
             team_ids = {}
-            for team_id, code in team_entries:
+            for team_id, code in team_entries.items():
                 team_ids[team_id] = code
                 team_ids[team_id.rsplit(":", 1)[-1]] = code
             game_markers = list(re.finditer(
@@ -213,13 +299,15 @@ def load_official_index():
                 chunk,
             ))
             games = []
+            game_ids = set()
             for index, game_marker in enumerate(game_markers):
                 end = game_markers[index + 1].start() if index + 1 < len(game_markers) else len(chunk)
                 game_fragment = chunk[game_marker.start():end]
                 game_id = re.search(r'"id"\s*:\s*"(\d+)"', game_fragment)
                 state = re.search(r'"state"\s*:\s*"([^"]+)"', game_fragment)
                 number = re.search(r'"number"\s*:\s*(\d+)', game_fragment)
-                if game_id and state and number:
+                if game_id and state and number and game_id.group(1) not in game_ids:
+                    game_ids.add(game_id.group(1))
                     games.append({
                         "id": game_id.group(1),
                         "number": int(number.group(1)),
@@ -240,7 +328,25 @@ def load_official_index():
             )
             if competition_match:
                 entry["competition"] = competition_match.group(1)
-            by_key[(local_date, codes)] = entry
+            existing = entries_by_id.get(entry["matchId"])
+            if existing:
+                existing["gameIds"] = list({
+                    (game["id"], game["number"]): game
+                    for game in existing["gameIds"] + entry["gameIds"]
+                }.values())
+                existing["teamIds"].update(entry["teamIds"])
+                if entry.get("competition") and not existing.get("competition"):
+                    existing["competition"] = entry["competition"]
+            else:
+                entries_by_id[entry["matchId"]] = entry
+        for entry in entries_by_id.values():
+            local_date = datetime.fromisoformat(entry["startTime"]).astimezone(
+                HONG_KONG
+            ).strftime("%Y-%m-%d")
+            codes = tuple(sorted(set(entry["teamIds"].values())))
+            if len(codes) != 2:
+                continue
+            by_key.setdefault((local_date, codes), []).append(entry)
             by_date.setdefault(local_date, []).append(entry)
             by_id[entry["matchId"]] = entry
     except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -258,18 +364,25 @@ def find_official_match(official_index, date, codes):
     index = official_index or {}
     by_key = index.get("by_key", index) if isinstance(index, dict) else {}
     normalized_codes = tuple(sorted(team_code(code) for code in codes))
-    official = by_key.get((date, normalized_codes))
-    if official:
-        return official
+    if len(set(normalized_codes)) != 2:
+        return None
+    keyed = by_key.get((date, normalized_codes), [])
+    if isinstance(keyed, dict):
+        keyed = [keyed]
+    keyed_ids = {entry.get("matchId") for entry in keyed if entry.get("matchId")}
+    if len(keyed_ids) == 1:
+        return keyed[0]
+    if len(keyed_ids) > 1:
+        return None
     candidates = index.get("by_date", {}).get(date, []) if isinstance(index, dict) else []
     wanted = set(normalized_codes)
-    return next(
-        (
-            candidate for candidate in candidates
-            if wanted == set(candidate.get("teamIds", {}).values())
-        ),
-        None,
-    )
+    exact = [
+        candidate for candidate in candidates
+        if len(set(candidate.get("teamIds", {}).values())) == 2
+        and wanted == set(candidate.get("teamIds", {}).values())
+    ]
+    exact_ids = {entry.get("matchId") for entry in exact if entry.get("matchId")}
+    return exact[0] if len(exact_ids) == 1 else None
 
 
 def parse_matches(league, page, html, official_index=None):
@@ -280,24 +393,41 @@ def parse_matches(league, page, html, official_index=None):
         flags=re.DOTALL,
     )
     for fallback_date, row in rows:
-        teams = re.findall(r'class="teamname">([^<]+)</span>', row)
-        scores = re.findall(r'class="[^"]*\bmatchlist-score\b[^"]*"[^>]*>\s*([0-9]+)\s*</td>', row)
         team_cells = re.findall(
             r'<td[^>]*class="[^"]*\bmatchlist-team[12]\b[^"]*"[^>]*>(.*?)</td>',
             row,
             flags=re.DOTALL,
         )
-        if len(teams) < 2:
+        if len(team_cells) != 2:
             continue
+        team_matches = [
+            re.search(r'class="teamname"[^>]*>(.*?)</span>', cell, re.DOTALL)
+            for cell in team_cells
+        ]
+        teams = [
+            html_module.unescape(re.sub(r"<[^>]+>", "", team.group(1))).strip()
+            if team else ""
+            for team in team_matches
+        ]
+        if len(teams) != 2 or any(not team for team in teams):
+            continue
+        scores = []
+        for cell in team_cells:
+            score = re.search(
+                r'class="[^"]*\bmatchlist-score\b[^"]*"[^>]*>\s*([0-9]+)\s*</',
+                cell,
+                re.DOTALL,
+            )
+            scores.append(int(score.group(1)) if score else None)
         start_match = re.search(r'class="countdowndate">([^<]+)</span>', row)
         start = parse_start(start_match.group(1)) if start_match else None
         date = start.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d") if start else fallback_date
         time = start.astimezone(timezone(timedelta(hours=8))).strftime("%H:%M") if start else "—"
-        status = "completed" if len(scores) >= 2 else (
+        status = "completed" if all(score is not None for score in scores) else (
             "live" if re.search(r"\blive\b|\bin[- ]progress\b", row, re.IGNORECASE) else "upcoming"
         )
         match = {
-                "id": f"{page}:{fallback_date}:{teams[0]}:{teams[1]}",
+                "id": "",
                 "date": date,
                 "time": time,
                 "status": status,
@@ -309,24 +439,28 @@ def parse_matches(league, page, html, official_index=None):
                 "redCode": team_code(teams[1].strip()),
                 "blueLogo": extract_logo(team_cells[0]) if len(team_cells) > 0 else None,
                 "redLogo": extract_logo(team_cells[1]) if len(team_cells) > 1 else None,
-                "blueScore": int(scores[0]) if len(scores) >= 1 else None,
-                "redScore": int(scores[1]) if len(scores) >= 2 else None,
+                "blueScore": scores[0],
+                "redScore": scores[1],
                 "series": "BO3",
                 "source": "Leaguepedia",
                 "link": f"https://lol.fandom.com/wiki/{quote(page)}",
                 "competition": league,
             }
         source_competition = match["competition"]
+        match["id"] = "local:" + "|".join(map(str, match_fallback_identity(match)[1:]))
         official = find_official_match(
             official_index,
             date,
             (match["blueCode"], match["redCode"]),
         )
         if official:
-            match.update(official)
+            match["matchId"] = official["matchId"]
+            match["startTime"] = official["startTime"]
+            match["gameIds"] = official["gameIds"]
+            match["teamIds"] = official["teamIds"]
+            if source_competition != "LCK" and official.get("competition"):
+                match["competition"] = official["competition"]
             match["id"] = official["matchId"]
-            if source_competition == "LCK":
-               match["competition"] = source_competition
         match["teams"] = {
             "blue": {"name": match["blue"], "code": match["blueCode"], "logo": match["blueLogo"]},
             "red": {"name": match["red"], "code": match["redCode"], "logo": match["redLogo"]},
@@ -539,16 +673,7 @@ def load_matches():
                 matches.extend(parsed)
             except Exception as error:
                 print(f"[Leaguepedia] {page}: {error}")
-    deduped = {}
-    for match in matches:
-        key = (match["date"], tuple(sorted((match["blueCode"], match["redCode"]))))
-        current = deduped.get(key)
-        if current is None or (
-            current.get("league") == "T1"
-            and match.get("league") == "LCK"
-        ) or (not current.get("matchId") and match.get("matchId")):
-            deduped[key] = match
-    matches = list(deduped.values())
+    matches = merge_match_records(matches)
     active_page = select_active_stage(stage_matches)
     CACHE["stage"] = {
         "page": active_page,

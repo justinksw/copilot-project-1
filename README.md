@@ -37,7 +37,7 @@ The refresh flow follows the useful parts of `AndyDanger/live-lol-esports`:
 - Clicking a match card loads the linked official game IDs and expands per-game champion, player, KDA, gold, creep score, and item details. The panel collapses when the card is clicked again.
 - Finished game panels identify the winning team from the final game snapshot and highlight it in the summary.
 - Detail loading skips unplayed games, probes the latest completed snapshot first, and fetches champion/item and live-stat feeds concurrently.
-- Schedule batches and normalized match history are cached in versioned `localStorage`, allowing loaded results to remain available during API outages. The server independently caches schedule, stage metadata, and standings data for 10 minutes.
+- Schedule batches and normalized match history are cached in versioned `localStorage`, allowing loaded results to remain available during API outages. Match records use official event IDs when available, otherwise a canonical date/team-pair/competition/time identity; changing the batch format discards older cached batches. The server independently caches schedule, stage metadata, and standings data for 10 minutes.
 - Leaguepedia's tournament and T1 match-history pages use `AutoMatches` to render their match rows; the proxy extracts those same rows.
 - Up to 500 normalized matches are cached in `localStorage`, allowing previously loaded results to remain available as historical data.
 - A production version should replace browser storage with a server database. The detail panel fetches a snapshot on demand; continuous live polling is intentionally out of scope for now.
