@@ -3,9 +3,9 @@ const REMOTE_API_URL = "https://justin-watch-api.onrender.com";
 const API_BASE_URL = window.NEXUS_API_BASE_URL
   || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
 const MATCH_TEAM = "T1";
-const HISTORY_KEY = "nexus-watch-match-history-v2";
-const BATCH_KEY = "nexus-watch-batches-v2";
-const LEGACY_BATCH_KEY = "nexus-watch-batches-v1";
+const HISTORY_KEY = "nexus-watch-match-history-v3";
+const BATCH_KEY = "nexus-watch-batches-v3";
+const LEGACY_BATCH_KEYS = ["nexus-watch-batches-v1", "nexus-watch-batches-v2"];
 const TEAM_CODE_ALIASES = Object.freeze({
   BILIBILI: "BLG", BNKFEAR: "BFX", BNKFEARX: "BFX", FEARX: "BFX",
   DPLUS: "DK", DPLUSKIA: "DK", DNF: "DNS", DNFREECS: "DNS",
@@ -41,11 +41,15 @@ function mondayOfWeek(key) {
   return shiftDate(key, -(day === 0 ? 6 : day - 1));
 }
 
-function tabRange(tab, today = dateKey(new Date())) {
+function calculateTabRange(tab, today, weekOffset = 0) {
   const monday = mondayOfWeek(today);
-  if (tab === "previous") return { from: shiftDate(monday, (state.weekOffset - 1) * 7), to: shiftDate(monday, state.weekOffset * 7 - 1) };
-  if (tab === "next") return { from: shiftDate(monday, (state.weekOffset + 1) * 7), to: shiftDate(monday, (state.weekOffset + 2) * 7 - 1) };
+  if (tab === "previous") return { from: shiftDate(monday, (weekOffset - 1) * 7), to: shiftDate(today, weekOffset * 7 - 1) };
+  if (tab === "next") return { from: shiftDate(today, weekOffset * 7 + 1), to: shiftDate(monday, (weekOffset + 2) * 7 - 1) };
   return { from: today, to: today };
+}
+
+function tabRange(tab, today = dateKey(new Date())) {
+  return calculateTabRange(tab, today, state.weekOffset);
 }
 
 function tabLabel(tab) {
@@ -77,7 +81,6 @@ function matchFallbackIdentity(match) {
   return JSON.stringify([
     match.date || "",
     codes,
-    match.competition || match.league || "",
     match.time || "—"
   ]);
 }
@@ -218,10 +221,10 @@ function renderStandings() {
 function renderMatchDetails(match) {
   if (!match.matchId) return `<p class="detail-message">Detailed game data is not linked for this match.</p>`;
   if (state.detailLoading.has(match.id)) return `<p class="detail-message">Loading champion, item, and gold data…</p>`;
-  if (state.detailErrors.has(match.id)) return `<p class="detail-message">${escapeHtml(state.detailErrors.get(match.id))}</p>`;
+  if (state.detailErrors.has(match.id)) return `<div class="detail-message"><p>${escapeHtml(state.detailErrors.get(match.id))}</p><button class="detail-retry" type="button">Retry</button></div>`;
   const details = state.details.get(match.id);
   if (!details) return `<p class="detail-message">Loading champion, item, and gold data…</p>`;
-  const availableGames = details.games.filter((game) => game.available !== false);
+  const availableGames = (Array.isArray(details.games) ? details.games : []).filter((game) => game.available !== false);
   return availableGames.length ? availableGames.map((game) => gameDetailMarkup(match, game)).join("") : `<p class="detail-message">No game details are available yet.</p>`;
 }
 
@@ -298,14 +301,14 @@ function normalizeRanges(ranges) {
 
 function saveBatches() {
   try {
-    localStorage.setItem(BATCH_KEY, JSON.stringify({ version: 2, ranges: state.ranges, matches: state.matches }));
+    localStorage.setItem(BATCH_KEY, JSON.stringify({ version: 3, ranges: state.ranges, matches: state.matches }));
     localStorage.setItem(HISTORY_KEY, JSON.stringify(state.matches.slice(-500)));
   } catch (error) { console.warn("Schedule cache could not be saved.", error); }
 }
 
 function loadBatches() {
   try {
-    localStorage.removeItem(LEGACY_BATCH_KEY);
+    LEGACY_BATCH_KEYS.forEach((key) => localStorage.removeItem(key));
     const saved = JSON.parse(localStorage.getItem(BATCH_KEY) || "null");
     if (saved?.matches) {
       state.matches = mergeMatches(saved.matches);
@@ -365,8 +368,9 @@ async function loadStandings() {
 async function refreshMatches() {
   state.ranges = []; state.scheduleStale = false; state.weekOffset = 0;
   const today = dateKey(new Date());
-  const monday = mondayOfWeek(today);
-  await fetchBatch(shiftDate(monday, -7), shiftDate(monday, 13));
+  const previous = calculateTabRange("previous", today);
+  const next = calculateTabRange("next", today);
+  await fetchBatch(previous.from, next.to);
   loadStandings();
 }
 
@@ -416,6 +420,13 @@ $("#match-list").addEventListener("click", (event) => {
   if (!card || event.target.closest("a")) return;
   const match = state.matches.find(({ id }) => id === card.dataset.matchKey);
   if (!match) return;
+  if (event.target.closest(".detail-retry")) {
+    state.detailErrors.delete(match.id);
+    state.expandedMatchId = match.id;
+    renderMatches();
+    loadMatchDetails(match);
+    return;
+  }
   if (state.expandedMatchId === match.id) { state.expandedMatchId = null; renderMatches(); return; }
   state.expandedMatchId = match.id; renderMatches();
   if (match.matchId && !state.details.has(match.id) && !state.detailLoading.has(match.id)) loadMatchDetails(match);

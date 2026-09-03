@@ -84,6 +84,28 @@ class ScheduleTests(unittest.TestCase):
         }
         self.assertIsNone(server.find_official_match(index, "2026-08-30", ("T1", "GEN")))
 
+    def test_ambiguous_same_day_pair_uses_local_start_time(self):
+        first = {
+            "matchId": "42",
+            "startTime": "2026-08-30T04:00:00+00:00",
+            "teamIds": {"team:1": "T1", "team:2": "GEN"},
+        }
+        second = {
+            "matchId": "43",
+            "startTime": "2026-08-30T08:00:00+00:00",
+            "teamIds": {"team:1": "T1", "team:2": "GEN"},
+        }
+        index = {
+            "by_key": {
+                ("2026-08-30", ("GEN", "T1")): [first, second],
+            },
+            "by_date": {"2026-08-30": [first, second]},
+        }
+        self.assertEqual(
+            server.find_official_match(index, "2026-08-30", ("T1", "GEN"), "16:00")["matchId"],
+            "43",
+        )
+
     def test_duplicate_sources_merge_but_rematches_do_not(self):
         base = {
             "date": "2026-08-30", "time": "12:00", "league": "LCK",
@@ -96,6 +118,99 @@ class ScheduleTests(unittest.TestCase):
         merged = server.merge_match_records([base, linked, rematch])
         self.assertEqual(len(merged), 2)
         self.assertEqual({match.get("matchId") for match in merged}, {"42", "43"})
+
+    def test_duplicate_sources_with_different_competitions_merge(self):
+        base = {
+            "date": "2026-08-30", "time": "12:00", "league": "LCK",
+            "competition": "LCK", "blue": "T1", "red": "BNK FearX",
+            "blueCode": "T1", "redCode": "BFX", "blueScore": 2, "redScore": 1,
+            "status": "completed",
+        }
+        history = {**base, "competition": "T1", "league": "T1"}
+        self.assertEqual(len(server.merge_match_records([base, history])), 1)
+
+    def test_game_details_return_unavailable_games_for_bad_feeds(self):
+        official = {
+            "by_id": {
+                "42": {
+                    "startTime": "2026-08-30T04:00:00+00:00",
+                    "teamIds": {"team:1": "T1", "team:2": "GEN"},
+                    "gameIds": [{"id": "1001", "number": 1, "state": "COMPLETED"}],
+                }
+            }
+        }
+        with patch.object(server, "load_official_index", return_value=official), \
+             patch.object(server, "fetch_feed", return_value={"frames": []}):
+            self.assertEqual(
+                server.load_game_details("42"),
+                {
+                    "matchId": "42",
+                    "games": [{"number": 1, "state": "COMPLETED", "available": False}],
+                },
+            )
+
+    def test_game_details_normalize_mocked_feeds(self):
+        official = {
+            "by_id": {
+                "42": {
+                    "startTime": "2026-08-30T04:00:00+00:00",
+                    "teamIds": {"team:1": "T1", "team:2": "GEN"},
+                    "gameIds": [{"id": "1001", "number": 1, "state": "completed"}],
+                }
+            }
+        }
+        window = {
+            "gameMetadata": {
+                "patchVersion": "16.15",
+                "blueTeamMetadata": {
+                    "esportsTeamId": "team:1",
+                    "participantMetadata": [{
+                        "participantId": 1, "summonerName": "Player1",
+                        "championId": "Ahri", "role": "mid",
+                    }],
+                },
+                "redTeamMetadata": {
+                    "esportsTeamId": "team:2",
+                    "participantMetadata": [{
+                        "participantId": 2, "summonerName": "Player2",
+                        "championId": "Azir", "role": "mid",
+                    }],
+                },
+            },
+            "frames": [{
+                "blueTeam": {
+                    "participants": [{"participantId": 1, "level": 10}],
+                    "totalGold": 1000, "totalKills": 3,
+                    "towers": 2, "inhibitors": 1, "barons": 1,
+                },
+                "redTeam": {
+                    "participants": [{"participantId": 2, "level": 9}],
+                    "totalGold": 800, "totalKills": 1,
+                    "towers": 0, "inhibitors": 0, "barons": 0,
+                },
+            }],
+        }
+        details = {
+            "frames": [{
+                "rfc460Timestamp": "2026-08-30T05:00:00Z",
+                "participants": [
+                    {"participantId": 1, "kills": 3, "deaths": 0, "assists": 2,
+                     "totalGoldEarned": 1000, "creepScore": 100, "items": ["1"]},
+                    {"participantId": 2, "kills": 1, "deaths": 3, "assists": 0,
+                     "totalGoldEarned": 800, "creepScore": 80, "items": []},
+                ],
+            }],
+        }
+
+        def feed(path, starting_time=None):
+            return details if path.startswith("details/") else window
+
+        with patch.object(server, "load_official_index", return_value=official), \
+             patch.object(server, "fetch_feed", side_effect=feed):
+            result = server.load_game_details("42")
+        self.assertEqual(result["games"][0]["teams"]["blue"]["code"], "T1")
+        self.assertEqual(result["games"][0]["teams"]["red"]["code"], "GEN")
+        self.assertEqual(result["games"][0]["teams"]["blue"]["participants"][0]["kills"], 3)
 
 
 if __name__ == "__main__":
