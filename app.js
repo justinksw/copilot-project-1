@@ -81,7 +81,6 @@ function matchFallbackIdentity(match) {
   return JSON.stringify([
     match.date || "",
     codes,
-    match.competition || match.league || "",
     match.time || "—"
   ]);
 }

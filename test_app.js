@@ -34,26 +34,26 @@ const match = {
 
 assert.strictEqual(context.canonicalTeamCode("Gen.G"), "GEN");
 assert.strictEqual(context.isTeamMatch(match, "T1"), true);
-assert.deepStrictEqual(context.calculateTabRange("previous", "2026-09-03"), {
+assert.strictEqual(JSON.stringify(context.calculateTabRange("previous", "2026-09-03")), JSON.stringify({
   from: "2026-08-24",
   to: "2026-09-02"
-});
-assert.deepStrictEqual(context.calculateTabRange("today", "2026-09-03"), {
+}));
+assert.strictEqual(JSON.stringify(context.calculateTabRange("today", "2026-09-03")), JSON.stringify({
   from: "2026-09-03",
   to: "2026-09-03"
-});
-assert.deepStrictEqual(context.calculateTabRange("next", "2026-09-03"), {
+}));
+assert.strictEqual(JSON.stringify(context.calculateTabRange("next", "2026-09-03")), JSON.stringify({
   from: "2026-09-04",
   to: "2026-09-13"
-});
-assert.deepStrictEqual(context.calculateTabRange("previous", "2026-09-03", -1), {
+}));
+assert.strictEqual(JSON.stringify(context.calculateTabRange("previous", "2026-09-03", -1)), JSON.stringify({
   from: "2026-08-17",
   to: "2026-08-26"
-});
-assert.deepStrictEqual(context.calculateTabRange("next", "2026-09-03", 1), {
+}));
+assert.strictEqual(JSON.stringify(context.calculateTabRange("next", "2026-09-03", 1)), JSON.stringify({
   from: "2026-09-11",
   to: "2026-09-20"
-});
+}));
 assert.strictEqual(context.mergeMatches([
   match,
   { ...match, id: "different-stale-id", matchId: undefined }
