@@ -69,6 +69,11 @@ function sortMatches(matches) {
   return [...matches].sort((a, b) => matchSortKey(a).localeCompare(matchSortKey(b)));
 }
 
+function matchStatus(match) {
+  if (match.blueScore != null && match.redScore != null) return "completed";
+  return match.status || "upcoming";
+}
+
 function canonicalTeamCode(value) {
   const normalized = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   return TEAM_CODE_ALIASES[normalized] || normalized.slice(0, 3);
@@ -148,12 +153,13 @@ function renderMatches() {
   const range = tabRange(state.activeTab);
   const visible = sortMatches(state.matches.filter((match) => match.date >= range.from && match.date <= range.to && isTeamMatch(match, MATCH_TEAM)));
   $("#match-list").innerHTML = visible.map((match) => {
-    const live = match.status === "live";
-    const completed = match.status === "completed";
+    const status = matchStatus(match);
+    const live = status === "live";
+    const completed = status === "completed";
     return `<article class="match-card ${state.expandedMatchId === match.id ? "is-expanded" : ""}" data-match-key="${escapeHtml(match.id)}" tabindex="0" aria-expanded="${state.expandedMatchId === match.id}">
       <div class="match-meta"><time datetime="${escapeHtml(match.date)}">${escapeHtml(dateFormatter.format(dateFromKey(match.date)))}</time><strong>${escapeHtml(match.time)}</strong><span>${escapeHtml(match.league)}</span><span>${escapeHtml(match.stage)}</span></div>
       <div class="team-column team-one">${teamMarkup(match.blue, match.blueCode, match.blueLogo, match.blueScore, completed && match.blueScore < match.redScore)}</div>
-      <div class="match-center"><span class="series">BEST OF ${escapeHtml(String(match.series || "BO3").replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${match.blueScore ?? "—"} - ${match.redScore ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(match.status)}">${live ? "● Live" : escapeHtml(match.status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
+      <div class="match-center"><span class="series">BEST OF ${escapeHtml(String(match.series || "BO3").replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${match.blueScore ?? "—"} - ${match.redScore ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(status)}">${live ? "● Live" : escapeHtml(status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
       <div class="team-column team-two">${teamMarkup(match.red, match.redCode, match.redLogo, match.redScore, completed && match.redScore < match.blueScore)}</div>
       ${state.expandedMatchId === match.id ? `<section class="match-details">${renderMatchDetails(match)}</section>` : ""}
     </article>`;
@@ -224,13 +230,19 @@ function renderMatchDetails(match) {
   if (state.detailErrors.has(match.id)) return `<div class="detail-message"><p>${escapeHtml(state.detailErrors.get(match.id))}</p><button class="detail-retry" type="button">Retry</button></div>`;
   const details = state.details.get(match.id);
   if (!details) return `<p class="detail-message">Loading champion, item, and gold data…</p>`;
-  const availableGames = (Array.isArray(details.games) ? details.games : []).filter((game) => game.available !== false);
-  return availableGames.length ? availableGames.map((game) => gameDetailMarkup(match, game)).join("") : `<p class="detail-message">No game details are available yet.</p>`;
+  const games = Array.isArray(details.games) ? details.games : [];
+  return games.length ? games.map((game) => gameDetailMarkup(match, game)).join("") : `<p class="detail-message">No game details are available yet.</p>`;
 }
 
 function gameDetailMarkup(match, game) {
+  if (game.available === false) {
+    return `<section class="game-detail unavailable"><strong>Game ${escapeHtml(game.number ?? "—")}</strong><span>${escapeHtml(game.state || "Details unavailable")}</span></section>`;
+  }
   const patch = game.patch || "16.15.1";
-  const teams = [game.teams.blue, game.teams.red];
+  const teams = [game.teams?.blue, game.teams?.red].filter(Boolean);
+  if (teams.length !== 2) {
+    return `<section class="game-detail unavailable"><strong>Game ${escapeHtml(game.number ?? "—")}</strong><span>Details unavailable</span></section>`;
+  }
   const winner = game.winner ? teamName(match, game.winner) : null;
   return `<section class="game-detail"><div class="game-detail-heading"><strong>Game ${escapeHtml(game.number)}</strong>${winner ? `<span class="game-winner">${escapeHtml(winner)} won</span>` : ""}<span>${escapeHtml(game.state)}</span><span>Patch ${escapeHtml(patch)}</span></div>
     <div class="game-detail-summary">${teams.map((team) => `<div class="detail-team-summary"><strong>${escapeHtml(teamName(match, team.code))}</strong><span>${escapeHtml(formatGold(team.totalGold))} gold · ${escapeHtml(team.kills)} kills</span></div>`).join('<span class="detail-divider">VS</span>')}</div>
