@@ -3,9 +3,9 @@ const REMOTE_API_URL = "https://justin-watch-api.onrender.com";
 const API_BASE_URL = window.NEXUS_API_BASE_URL
   || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
 const MATCH_TEAM = "T1";
-const HISTORY_KEY = "nexus-watch-match-history-v3";
-const BATCH_KEY = "nexus-watch-batches-v3";
-const LEGACY_BATCH_KEYS = ["nexus-watch-batches-v1", "nexus-watch-batches-v2"];
+const HISTORY_KEY = "nexus-watch-match-history-v4";
+const BATCH_KEY = "nexus-watch-batches-v4";
+const LEGACY_BATCH_KEYS = ["nexus-watch-batches-v1", "nexus-watch-batches-v2", "nexus-watch-batches-v3"];
 const TEAM_CODE_ALIASES = Object.freeze({
   BILIBILI: "BLG", BNKFEAR: "BFX", BNKFEARX: "BFX", FEARX: "BFX",
   DPLUS: "DK", DPLUSKIA: "DK", DNF: "DNS", DNFREECS: "DNS",
@@ -70,8 +70,21 @@ function sortMatches(matches) {
 }
 
 function matchStatus(match) {
-  if (match.blueScore != null && match.redScore != null) return "completed";
-  return match.status || "upcoming";
+  return validMatchScore(match) ? "completed" : match.status === "live" ? "live" : "upcoming";
+}
+
+function unresolvedOpponent(value) {
+  const normalized = String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
+  return !normalized || /^(TBD|TBC|TBA|UNKNOWN|N\/?A|TO BE (DETERMINED|CONFIRMED)|(?:WINNER|LOSER) OF\b|(?:TEAM|SEED|SLOT|BRACKET)\s*[\w#-]*)$/.test(normalized);
+}
+
+function validMatchScore(match) {
+  const scores = [match.blueScore, match.redScore];
+  const teams = [match.blueCode || match.blue, match.redCode || match.red];
+  if (teams.some(unresolvedOpponent)
+    || scores.some((score) => !Number.isInteger(score) || score < 0 || score > 3)) return false;
+  const target = String(match.series || "").toUpperCase() === "BO5" ? 3 : 2;
+  return Math.max(...scores) === target && Math.min(...scores) < target;
 }
 
 function canonicalTeamCode(value) {
@@ -156,11 +169,12 @@ function renderMatches() {
     const status = matchStatus(match);
     const live = status === "live";
     const completed = status === "completed";
+    const scores = validMatchScore(match) ? [match.blueScore, match.redScore] : [null, null];
     return `<article class="match-card ${state.expandedMatchId === match.id ? "is-expanded" : ""}" data-match-key="${escapeHtml(match.id)}" tabindex="0" aria-expanded="${state.expandedMatchId === match.id}">
       <div class="match-meta"><time datetime="${escapeHtml(match.date)}">${escapeHtml(dateFormatter.format(dateFromKey(match.date)))}</time><strong>${escapeHtml(match.time)}</strong><span>${escapeHtml(match.league)}</span><span>${escapeHtml(match.stage)}</span></div>
-      <div class="team-column team-one">${teamMarkup(match.blue, match.blueCode, match.blueLogo, match.blueScore, completed && match.blueScore < match.redScore)}</div>
-      <div class="match-center"><span class="series">BEST OF ${escapeHtml(String(match.series || "BO3").replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${match.blueScore ?? "—"} - ${match.redScore ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(status)}">${live ? "● Live" : escapeHtml(status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
-      <div class="team-column team-two">${teamMarkup(match.red, match.redCode, match.redLogo, match.redScore, completed && match.redScore < match.blueScore)}</div>
+      <div class="team-column team-one">${teamMarkup(match.blue, match.blueCode, match.blueLogo, scores[0], completed && scores[0] < scores[1])}</div>
+      <div class="match-center"><span class="series">BEST OF ${escapeHtml(String(match.series || "BO3").replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${scores[0] ?? "—"} - ${scores[1] ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(status)}">${live ? "● Live" : escapeHtml(status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
+      <div class="team-column team-two">${teamMarkup(match.red, match.redCode, match.redLogo, scores[1], completed && scores[1] < scores[0])}</div>
       ${state.expandedMatchId === match.id ? `<section class="match-details">${renderMatchDetails(match)}</section>` : ""}
     </article>`;
   }).join("");
@@ -225,7 +239,11 @@ function renderStandings() {
 }
 
 function renderMatchDetails(match) {
-  if (!match.matchId) return `<p class="detail-message">Detailed game data is not linked for this match.</p>`;
+  if (!match.matchId || !String(match.matchId).trim()) {
+    return `<p class="detail-message">${matchStatus(match) === "upcoming"
+      ? "Official game data will appear after this match is linked."
+      : "Official game data is not linked for this result."}</p>`;
+  }
   if (state.detailLoading.has(match.id)) return `<p class="detail-message">Loading champion, item, and gold data…</p>`;
   if (state.detailErrors.has(match.id)) return `<div class="detail-message"><p>${escapeHtml(state.detailErrors.get(match.id))}</p><button class="detail-retry" type="button">Retry</button></div>`;
   const details = state.details.get(match.id);
@@ -266,6 +284,7 @@ function differenceClass(value) { return value > 0 ? "positive" : value < 0 ? "n
 function teamName(match, code) { return code === match.blueCode ? match.blue : code === match.redCode ? match.red : code; }
 
 async function loadMatchDetails(match) {
+  if (!match.matchId || !String(match.matchId).trim()) return;
   state.detailLoading.add(match.id); renderMatches();
   try {
     const response = await fetch(`${API_BASE_URL}/api/match-details?matchId=${encodeURIComponent(match.matchId)}`);
@@ -322,7 +341,7 @@ function loadBatches() {
   try {
     LEGACY_BATCH_KEYS.forEach((key) => localStorage.removeItem(key));
     const saved = JSON.parse(localStorage.getItem(BATCH_KEY) || "null");
-    if (saved?.matches) {
+    if (saved?.version === 4 && saved.matches) {
       state.matches = mergeMatches(saved.matches);
       state.ranges = normalizeRanges(saved.ranges || []);
     }
@@ -441,7 +460,8 @@ $("#match-list").addEventListener("click", (event) => {
   }
   if (state.expandedMatchId === match.id) { state.expandedMatchId = null; renderMatches(); return; }
   state.expandedMatchId = match.id; renderMatches();
-  if (match.matchId && !state.details.has(match.id) && !state.detailLoading.has(match.id)) loadMatchDetails(match);
+  if (match.matchId && String(match.matchId).trim()
+  && !state.details.has(match.id) && !state.detailLoading.has(match.id)) loadMatchDetails(match);
 });
 
 loadBatches();
