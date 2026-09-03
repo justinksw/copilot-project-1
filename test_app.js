@@ -34,6 +34,8 @@ const match = {
 
 assert.strictEqual(context.canonicalTeamCode("Gen.G"), "GEN");
 assert.strictEqual(context.isTeamMatch(match, "T1"), true);
+assert.strictEqual(context.matchStatus({ status: "upcoming", blueScore: 2, redScore: 3 }), "completed");
+assert.strictEqual(context.matchStatus({ status: "live", blueScore: null, redScore: null }), "live");
 assert.strictEqual(JSON.stringify(context.calculateTabRange("previous", "2026-09-03")), JSON.stringify({
   from: "2026-08-24",
   to: "2026-09-02"

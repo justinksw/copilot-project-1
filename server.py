@@ -31,6 +31,7 @@ DEFAULT_STAGE_SUFFIX = "Rounds_3-4"  # Only used when Leaguepedia is unavailable
 HONG_KONG = timezone(timedelta(hours=8))
 TEAM_CODE_ALIASES = {
     "BILIBILI": "BLG",
+    "BILIBILIGAMING": "BLG",
     "BNKFEARX": "BFX",
     "BNKFEAR": "BFX",
     "FEARX": "BFX",
@@ -38,9 +39,13 @@ TEAM_CODE_ALIASES = {
     "DPLUS": "DK",
     "DNFREECS": "DNS",
     "DNF": "DNS",
+    "DRX": "DRX",
     "GENG": "GEN",
+    "GEN.G": "GEN",
+    "GEN.GESPORTS": "GEN",
     "HANWHALIFEESPORTS": "HLE",
     "HANWHA": "HLE",
+    "HANWHALIFE": "HLE",
     "KTROLSTER": "KT",
     "NONGSHIMREDFORCE": "NS",
     "NONGSHIM": "NS",
@@ -56,8 +61,72 @@ STAGE_CACHE = {
 
 
 def team_code(name):
-    normalized = re.sub(r"[^A-Z0-9]", "", name.upper())
+    normalized = re.sub(r"[^A-Z0-9]", "", str(name or "").upper())
     return TEAM_CODE_ALIASES.get(normalized, normalized[:3])
+
+
+def parse_score(value):
+    if value is None:
+        return None
+    match = re.search(r"\b([0-9]+)\b", html_module.unescape(str(value)))
+    return int(match.group(1)) if match else None
+
+
+def extract_scores(row, team_cells):
+    score_pattern = r'class="[^"]*\b(?:matchlist-)?score\b[^"]*"[^>]*>(.*?)</'
+    scores = [
+        parse_score(re.search(
+            score_pattern,
+            cell,
+            re.DOTALL,
+        ).group(1))
+        if re.search(score_pattern, cell, re.DOTALL)
+        else None
+        for cell in team_cells
+    ]
+    if all(score is not None for score in scores):
+        return scores
+
+    score_values = [
+        parse_score(match.group(1))
+        for match in re.finditer(
+            score_pattern,
+            row,
+            re.DOTALL,
+        )
+    ]
+    if len(score_values) >= 2:
+        return score_values[:2]
+
+    attribute_result = re.search(
+        r'\bdata-(?:score|result)\s*=\s*["\']\s*([0-9]+)\s*[-–—:]\s*([0-9]+)',
+        row,
+        re.IGNORECASE,
+    )
+    if attribute_result:
+        return [int(attribute_result.group(1)), int(attribute_result.group(2))]
+
+    text = html_module.unescape(re.sub(r"<[^>]+>", " ", row))
+    result = re.search(r"\b([0-9]+)\s*[-–—:]\s*([0-9]+)\b", text)
+    if result:
+        return [int(result.group(1)), int(result.group(2))]
+    return scores
+
+
+def has_completed_result(scores, row):
+    return all(score is not None for score in scores) or bool(
+        re.search(r"\b(completed|finished|final|result)\b", row, re.IGNORECASE)
+        and re.search(r"\b[0-9]+\s*[-–—:]\s*[0-9]+\b", html_module.unescape(
+            re.sub(r"<[^>]+>", " ", row)
+        ))
+    )
+
+
+def extract_series(row, scores):
+    series_match = re.search(r"\b(?:BO|BEST\s+OF\s*)([357])\b", row, re.IGNORECASE)
+    if series_match:
+        return f"BO{series_match.group(1)}"
+    return "BO5" if any(score is not None and score >= 3 for score in scores) else "BO3"
 
 
 def fetch_page(page):
@@ -182,6 +251,11 @@ def merge_match_record(existing, incoming):
             continue
         if merged.get(key) in (None, "", "—", []):
             merged[key] = value
+    if (
+        merged.get("blueScore") is not None
+        and merged.get("redScore") is not None
+    ):
+        merged["status"] = "completed"
     if preferred.get("matchId") and not merged.get("matchId"):
         merged["matchId"] = preferred["matchId"]
     return merged
@@ -248,16 +322,11 @@ def load_official_index():
     by_date = {}
     by_id = {}
     try:
-        html = fetch_official_schedule()
+        html = normalize_official_payload(fetch_official_schedule())
         marker = re.compile(
-            r'\{\s*"__typename"\s*:\s*"EventMatch"\s*,\s*"id"\s*:\s*"\d+"'
+            r'\{\s*"__typename"\s*:\s*"EventMatch"'
         )
         starts = [match.start() for match in marker.finditer(html)]
-        if not starts:
-            # Some Next.js responses put the schedule JSON inside an escaped
-            # script string instead of returning it as a raw JSON fragment.
-            html = html.replace('\\"', '"')
-            starts = [match.start() for match in marker.finditer(html)]
         chunks = [
             html[start:end]
             for start, end in zip(starts, starts[1:] + [len(html)])
@@ -265,8 +334,9 @@ def load_official_index():
         entries_by_id = {}
         for chunk in chunks:
             event_match = re.search(
-                r'\{\s*"__typename"\s*:\s*"EventMatch"\s*,\s*"id"\s*:\s*"(\d+)"',
+                r'\{\s*"__typename"\s*:\s*"EventMatch".*?"id"\s*:\s*"([^"]+)"',
                 chunk,
+                re.DOTALL,
             )
             start_match = re.search(r'"startTime"\s*:\s*"([^"]+)"', chunk)
             if not event_match or not start_match:
@@ -302,7 +372,7 @@ def load_official_index():
             for index, game_marker in enumerate(game_markers):
                 end = game_markers[index + 1].start() if index + 1 < len(game_markers) else len(chunk)
                 game_fragment = chunk[game_marker.start():end]
-                game_id = re.search(r'"id"\s*:\s*"(\d+)"', game_fragment)
+                game_id = re.search(r'"id"\s*:\s*"([^"]+)"', game_fragment)
                 state = re.search(r'"state"\s*:\s*"([^"]+)"', game_fragment)
                 number = re.search(r'"number"\s*:\s*(\d+)', game_fragment)
                 if game_id and state and number and game_id.group(1) not in game_ids:
@@ -322,17 +392,16 @@ def load_official_index():
                 "teamIds": team_ids,
             }
             competition_match = re.search(
-                r'"(?:tournamentName|leagueName|eventName)":"([^"]+)"',
+                r'"(?:tournamentName|leagueName|eventName)"\s*:\s*"([^"]+)"',
                 chunk,
             )
             if competition_match:
                 entry["competition"] = competition_match.group(1)
             existing = entries_by_id.get(entry["matchId"])
             if existing:
-                existing["gameIds"] = list({
-                    (game["id"], game["number"]): game
-                    for game in existing["gameIds"] + entry["gameIds"]
-                }.values())
+                existing["gameIds"] = merge_game_ids(
+                    existing["gameIds"], entry["gameIds"]
+                )
                 existing["teamIds"].update(entry["teamIds"])
                 if entry.get("competition") and not existing.get("competition"):
                     existing["competition"] = entry["competition"]
@@ -359,6 +428,33 @@ def load_official_index():
     return OFFICIAL_CACHE
 
 
+def merge_game_ids(existing, incoming):
+    merged = {}
+    for game in (existing or []) + (incoming or []):
+        if not isinstance(game, dict) or not game.get("id"):
+            continue
+        key = (str(game["id"]), game.get("number"))
+        previous = merged.get(key)
+        if not previous or game_state_quality(game) > game_state_quality(previous):
+            merged[key] = game
+    return list(merged.values())
+
+
+def game_state_quality(game):
+    state = str(game.get("state", "")).lower()
+    return (
+        state in {"completed", "complete", "finished", "ended"},
+        state in {"inprogress", "in_progress", "live"},
+    )
+
+
+def normalize_official_payload(payload):
+    normalized = html_module.unescape(payload or "")
+    for _ in range(2):
+        normalized = normalized.replace(r"\"", '"').replace(r"\u0022", '"')
+    return normalized
+
+
 def find_official_match(official_index, date, codes, match_time=None):
     index = official_index or {}
     by_key = index.get("by_key", index) if isinstance(index, dict) else {}
@@ -369,15 +465,18 @@ def find_official_match(official_index, date, codes, match_time=None):
     if isinstance(keyed, dict):
         keyed = [keyed]
     keyed_ids = {entry.get("matchId") for entry in keyed if entry.get("matchId")}
-    if len(keyed_ids) == 1:
-        return keyed[0]
-    if len(keyed_ids) > 1:
+    if match_time:
         timed = [
             entry for entry in keyed
             if official_local_time(entry) == match_time
-        ] if match_time else []
+        ]
         timed_ids = {entry.get("matchId") for entry in timed if entry.get("matchId")}
-        return timed[0] if len(timed_ids) == 1 else None
+        if len(timed_ids) == 1:
+            return timed[0]
+    if len(keyed_ids) == 1:
+        return keyed[0]
+    if len(keyed_ids) > 1:
+        return None
     candidates = index.get("by_date", {}).get(date, []) if isinstance(index, dict) else []
     wanted = set(normalized_codes)
     exact = [
@@ -386,14 +485,17 @@ def find_official_match(official_index, date, codes, match_time=None):
         and wanted == set(candidate.get("teamIds", {}).values())
     ]
     exact_ids = {entry.get("matchId") for entry in exact if entry.get("matchId")}
+    if match_time:
+        timed = [
+            entry for entry in exact
+            if official_local_time(entry) == match_time
+        ]
+        timed_ids = {entry.get("matchId") for entry in timed if entry.get("matchId")}
+        if len(timed_ids) == 1:
+            return timed[0]
     if len(exact_ids) == 1:
         return exact[0]
-    timed = [
-        entry for entry in exact
-        if official_local_time(entry) == match_time
-    ] if match_time else []
-    timed_ids = {entry.get("matchId") for entry in timed if entry.get("matchId")}
-    return timed[0] if len(timed_ids) == 1 else None
+    return None
 
 
 def official_local_time(entry):
@@ -429,19 +531,12 @@ def parse_matches(league, page, html, official_index=None):
         ]
         if len(teams) != 2 or any(not team for team in teams):
             continue
-        scores = []
-        for cell in team_cells:
-            score = re.search(
-                r'class="[^"]*\bmatchlist-score\b[^"]*"[^>]*>\s*([0-9]+)\s*</',
-                cell,
-                re.DOTALL,
-            )
-            scores.append(int(score.group(1)) if score else None)
+        scores = extract_scores(row, team_cells)
         start_match = re.search(r'class="countdowndate">([^<]+)</span>', row)
         start = parse_start(start_match.group(1)) if start_match else None
         date = start.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d") if start else fallback_date
         time = start.astimezone(timezone(timedelta(hours=8))).strftime("%H:%M") if start else "—"
-        status = "completed" if all(score is not None for score in scores) else (
+        status = "completed" if has_completed_result(scores, row) else (
             "live" if re.search(r"\blive\b|\bin[- ]progress\b", row, re.IGNORECASE) else "upcoming"
         )
         match = {
@@ -459,10 +554,11 @@ def parse_matches(league, page, html, official_index=None):
                 "redLogo": extract_logo(team_cells[1]) if len(team_cells) > 1 else None,
                 "blueScore": scores[0],
                 "redScore": scores[1],
-                "series": "BO3",
+                "series": extract_series(row, scores),
                 "source": "Leaguepedia",
                 "link": f"https://lol.fandom.com/wiki/{quote(page)}",
                 "competition": league,
+                "officialLinkStatus": "unmatched",
             }
         source_competition = match["competition"]
         match["id"] = "local:" + "|".join(map(str, match_fallback_identity(match)[1:]))
@@ -480,6 +576,7 @@ def parse_matches(league, page, html, official_index=None):
             if source_competition != "LCK" and official.get("competition"):
                 match["competition"] = official["competition"]
             match["id"] = official["matchId"]
+            match["officialLinkStatus"] = "linked"
         match["teams"] = {
             "blue": {"name": match["blue"], "code": match["blueCode"], "logo": match["blueLogo"]},
             "red": {"name": match["red"], "code": match["redCode"], "logo": match["redLogo"]},
@@ -528,18 +625,11 @@ def useful_details(payload):
     participants = frame.get("participants", [])
     if not isinstance(participants, list):
         return False
-    return any(
-        participant.get("items")
-        or participant.get("totalGoldEarned", 0)
-        or participant.get("kills", 0)
-        or participant.get("deaths", 0)
-        for participant in participants
-        if isinstance(participant, dict)
-    )
+    return any(isinstance(participant, dict) for participant in participants)
 
 
 def determine_game_winner(teams, state):
-    if str(state or "").lower() not in {"finished", "completed"}:
+    if str(state or "").lower() not in {"finished", "completed", "complete", "ended"}:
         return None
     ranked = sorted(
         teams.values(),
@@ -601,7 +691,14 @@ def normalize_game_details(game, window, details, team_ids):
         team_metadata = metadata.get(metadata_key, {})
         if not isinstance(team_metadata, dict):
             team_metadata = {}
-        team_code = team_ids.get(team_metadata.get("esportsTeamId"), "TBD")
+        team_identifier = (
+            team_metadata.get("esportsTeamId")
+            or team_metadata.get("teamId")
+            or team_metadata.get("id")
+        )
+        team_code = team_ids.get(team_identifier) or team_ids.get(
+            str(team_identifier), "TBD"
+        )
         participants = []
         player_metadata = team_metadata.get("participantMetadata", [])
         if not isinstance(player_metadata, list):
@@ -663,7 +760,7 @@ def normalize_game_details(game, window, details, team_ids):
 
 def load_game_details(match_id):
     index = load_official_index()["by_id"]
-    match = index.get(match_id)
+    match = index.get(str(match_id)) or index.get(match_id)
     if not match:
         raise ValueError("Match details are not linked for this card")
     games = []
@@ -671,9 +768,13 @@ def load_game_details(match_id):
         if not isinstance(game, dict):
             continue
         game_state = str(game.get("state", "")).lower()
-        if game_state not in {"completed", "finished", "inprogress", "in_progress", "live"}:
-            continue
         if not game.get("id"):
+            games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
+            continue
+        if game_state not in {
+            "completed", "complete", "finished", "ended",
+            "inprogress", "in_progress", "live",
+        }:
             games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
             continue
         detail = None
@@ -684,13 +785,16 @@ def load_game_details(match_id):
             games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
             continue
         probe_offsets = (
-            (360, 300, 240, 180, 120, 60, 30, 15, 0)
-            if game_state in {"completed", "finished"}
-            else (180, 120, 60, 30, 15, 0)
+            (360, 300, 240, 180, 120, 60, 30, 15, 0, -15)
+            if game_state in {"completed", "complete", "finished", "ended"}
+            else (180, 120, 60, 30, 15, 0, -15)
         )
         with ThreadPoolExecutor(max_workers=2) as executor:
-            for offset in probe_offsets:
-                timestamp = (start + timedelta(minutes=offset)).isoformat().replace("+00:00", "Z")
+            timestamps = [
+                (start + timedelta(minutes=offset)).isoformat().replace("+00:00", "Z")
+                for offset in probe_offsets
+            ] + [None]
+            for timestamp in timestamps:
                 detail_future = executor.submit(fetch_feed, f"details/{game['id']}", timestamp)
                 window_future = executor.submit(fetch_feed, f"window/{game['id']}", timestamp)
                 try:
@@ -713,12 +817,18 @@ def load_game_details(match_id):
 
 
 def parse_start(value):
-    for pattern in ("%d %B %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S %z"):
+    value = html_module.unescape(str(value or "")).strip()
+    for pattern in (
+        "%d %B %Y %H:%M:%S %z",
+        "%d %b %Y %H:%M:%S %z",
+        "%d %B %Y %H:%M %z",
+        "%d %b %Y %H:%M %z",
+    ):
         try:
             return datetime.strptime(value, pattern)
         except ValueError:
             pass
-    return datetime.fromisoformat(value.replace(" ", "T"))
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def load_matches():

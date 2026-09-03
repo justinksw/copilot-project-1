@@ -54,6 +54,21 @@ class ScheduleTests(unittest.TestCase):
             ("T1", "Gen.G", 2, 1),
         )
 
+    def test_parse_matches_normalizes_combined_bo5_score(self):
+        html = """
+          <tr class="ml-row" data-date="2026-08-30">
+            <td class="matchlist-team1"><span class="teamname">T1</span></td>
+            <td class="matchlist-team2"><span class="teamname">HLE</span></td>
+            <td class="matchlist-score">2–3</td>
+            <span class="countdowndate">30 August 2026 12:00:00 +0800</span>
+          </tr>
+        """
+        parsed = server.parse_matches("LCK", "LCK/2026_Season/Stage", html)
+        self.assertEqual(
+            (parsed[0]["blueScore"], parsed[0]["redScore"], parsed[0]["series"], parsed[0]["status"]),
+            (2, 3, "BO5", "completed"),
+        )
+
     def test_official_index_deduplicates_ids_and_supports_escaped_json(self):
         fragment = json.dumps(official_fragment("42"))
         escaped = fragment.replace('"', '\\"')
@@ -66,6 +81,22 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(
             server.find_official_match(index, "2026-08-30", ("GEN", "T1"))["matchId"],
             "42",
+        )
+
+    def test_official_index_links_multiple_matches_with_aliases(self):
+        first = official_fragment("event-gen")
+        second = official_fragment("event-hle", "T1", "Hanwha Life Esports")
+        second["startTime"] = "2026-08-30T08:00:00Z"
+        payload = json.dumps(first) + "\n" + json.dumps(second)
+        with patch.object(server, "fetch_official_schedule", return_value=payload):
+            server.OFFICIAL_CACHE["expires"] = server.datetime.min.replace(
+                tzinfo=server.timezone.utc
+            )
+            index = server.load_official_index()
+        self.assertEqual(set(index["by_id"]), {"event-gen", "event-hle"})
+        self.assertEqual(
+            server.find_official_match(index, "2026-08-30", ("T1", "HLE"), "16:00")["matchId"],
+            "event-hle",
         )
 
     def test_ambiguous_same_day_pair_is_not_linked(self):
@@ -128,6 +159,20 @@ class ScheduleTests(unittest.TestCase):
         }
         history = {**base, "competition": "T1", "league": "T1"}
         self.assertEqual(len(server.merge_match_records([base, history])), 1)
+
+    def test_completed_duplicate_wins_over_upcoming_record(self):
+        completed = {
+            "date": "2026-08-30", "time": "12:00", "blue": "T1", "red": "HLE",
+            "blueCode": "T1", "redCode": "HLE", "blueScore": 2, "redScore": 3,
+            "status": "completed",
+        }
+        upcoming = {**completed, "blueScore": None, "redScore": None, "status": "upcoming"}
+        merged = server.merge_match_records([upcoming, completed])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(
+            (merged[0]["blueScore"], merged[0]["redScore"], merged[0]["status"]),
+            (2, 3, "completed"),
+        )
 
     def test_game_details_return_unavailable_games_for_bad_feeds(self):
         official = {
@@ -211,6 +256,66 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(result["games"][0]["teams"]["blue"]["code"], "T1")
         self.assertEqual(result["games"][0]["teams"]["red"]["code"], "GEN")
         self.assertEqual(result["games"][0]["teams"]["blue"]["participants"][0]["kills"], 3)
+
+    def test_game_details_keep_unavailable_games_when_another_game_loads(self):
+        official = {
+            "by_id": {
+                "42": {
+                    "startTime": "2026-08-30T04:00:00+00:00",
+                    "teamIds": {"team:1": "T1", "team:2": "GEN"},
+                    "gameIds": [
+                        {"id": "1001", "number": 1, "state": "completed"},
+                        {"id": "1002", "number": 2, "state": "completed"},
+                    ],
+                }
+            }
+        }
+        window = {
+            "gameMetadata": {
+                "patchVersion": "16.15",
+                "blueTeamMetadata": {
+                    "esportsTeamId": "team:1",
+                    "participantMetadata": [{
+                        "participantId": 1, "summonerName": "Player1",
+                        "championId": "Ahri", "role": "mid",
+                    }],
+                },
+                "redTeamMetadata": {
+                    "esportsTeamId": "team:2",
+                    "participantMetadata": [{
+                        "participantId": 2, "summonerName": "Player2",
+                        "championId": "Azir", "role": "mid",
+                    }],
+                },
+            },
+            "frames": [{
+                "blueTeam": {"participants": [{"participantId": 1, "level": 10}],
+                             "totalGold": 1000, "totalKills": 3},
+                "redTeam": {"participants": [{"participantId": 2, "level": 9}],
+                            "totalGold": 800, "totalKills": 1},
+            }],
+        }
+        details = {
+            "frames": [{
+                "rfc460Timestamp": "2026-08-30T05:00:00Z",
+                "participants": [
+                    {"participantId": 1, "kills": 3, "deaths": 0, "assists": 2},
+                    {"participantId": 2, "kills": 1, "deaths": 3, "assists": 0},
+                ],
+            }],
+        }
+
+        def feed(path, starting_time=None):
+            if "1001" in path:
+                raise OSError("first game's feed is unavailable")
+            return details if path.startswith("details/") else window
+
+        with patch.object(server, "load_official_index", return_value=official), \
+             patch.object(server, "fetch_feed", side_effect=feed):
+            result = server.load_game_details("42")
+        self.assertEqual(len(result["games"]), 2)
+        self.assertEqual(result["games"][0]["available"], False)
+        self.assertEqual(result["games"][1]["teams"]["blue"]["code"], "T1")
 
 
 if __name__ == "__main__":
