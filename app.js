@@ -75,15 +75,16 @@ function matchStatus(match) {
 
 function unresolvedOpponent(value) {
   const normalized = String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
-  return !normalized || /^(TBD|TBC|TBA|UNKNOWN|N\/?A|TO BE (DETERMINED|CONFIRMED)|(?:WINNER|LOSER) OF\b|(?:TEAM|SEED|SLOT|BRACKET)\s*[\w#-]*)$/.test(normalized);
+  return !normalized || /^(TBD|TBC|TBA|UNKNOWN|N\/?A|TO BE (DETERMINED|CONFIRMED)|(?:WINNER|LOSER) OF\b.*|(?:TEAM|SEED|SLOT|BRACKET)\s*[\w#-]*)$/.test(normalized);
 }
 
 function validMatchScore(match) {
   const scores = [match.blueScore, match.redScore];
-  const teams = [match.blueCode || match.blue, match.redCode || match.red];
-  if (teams.some(unresolvedOpponent)
+  const teams = [match.blueCode, match.blue, match.redCode, match.red];
+  if (teams.some((team) => team !== undefined && unresolvedOpponent(team))
     || scores.some((score) => !Number.isInteger(score) || score < 0 || score > 3)) return false;
-  const target = String(match.series || "").toUpperCase() === "BO5" ? 3 : 2;
+  const target = String(match.series || "").toUpperCase() === "BO5"
+    || Math.max(...scores) === 3 ? 3 : 2;
   return Math.max(...scores) === target && Math.min(...scores) < target;
 }
 
@@ -332,7 +333,7 @@ function normalizeRanges(ranges) {
 
 function saveBatches() {
   try {
-    localStorage.setItem(BATCH_KEY, JSON.stringify({ version: 3, ranges: state.ranges, matches: state.matches }));
+    localStorage.setItem(BATCH_KEY, JSON.stringify({ version: 4, ranges: state.ranges, matches: state.matches }));
     localStorage.setItem(HISTORY_KEY, JSON.stringify(state.matches.slice(-500)));
   } catch (error) { console.warn("Schedule cache could not be saved.", error); }
 }

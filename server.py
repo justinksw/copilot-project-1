@@ -19,7 +19,12 @@ CACHE = {
     "matches": [],
     "stage": {"page": "", "label": "", "year": "", "key": "", "refreshedAt": ""},
 }
-OFFICIAL_CACHE = {"expires": datetime.min.replace(tzinfo=timezone.utc), "by_key": {}, "by_id": {}}
+OFFICIAL_CACHE = {
+    "expires": datetime.min.replace(tzinfo=timezone.utc),
+    "by_key": {},
+    "by_id": {},
+    "diagnostics": {},
+}
 DETAIL_CACHE = {}
 LOGO_CACHE = {}
 STANDINGS_CACHE = {
@@ -76,7 +81,7 @@ def parse_score(value):
 UNRESOLVED_OPPONENT_RE = re.compile(
     r"^(?:TBD|TBC|TBA|UNKNOWN|N/?A|"
     r"TO\s+BE\s+DETERMINED|TO\s+BE\s+CONFIRMED|"
-    r"(?:WINNER|LOSER)\s+OF\b|"
+    r"(?:WINNER|LOSER)\s+OF\b.*|"
     r"(?:TEAM|SEED|SLOT|BRACKET)\s*[\w#-]*)$",
     re.IGNORECASE,
 )
@@ -510,6 +515,8 @@ def normalize_official_payload(payload):
 def find_official_match(official_index, date, codes, match_time=None):
     index = official_index or {}
     by_key = index.get("by_key", index) if isinstance(index, dict) else {}
+    if any(is_unresolved_opponent(code) for code in codes):
+        return None
     normalized_codes = tuple(sorted(team_code(code) for code in codes))
     if any(is_unresolved_opponent(code) for code in normalized_codes):
         return None
