@@ -4,7 +4,15 @@ const API_BASE_URL = window.NEXUS_API_BASE_URL
   || (window.location.hostname.endsWith(".github.io") ? REMOTE_API_URL : "");
 const MATCH_TEAM = "T1";
 const HISTORY_KEY = "nexus-watch-match-history-v2";
-const BATCH_KEY = "nexus-watch-batches-v1";
+const BATCH_KEY = "nexus-watch-batches-v2";
+const LEGACY_BATCH_KEY = "nexus-watch-batches-v1";
+const TEAM_CODE_ALIASES = Object.freeze({
+  BILIBILI: "BLG", BNKFEAR: "BFX", BNKFEARX: "BFX", FEARX: "BFX",
+  DPLUS: "DK", DPLUSKIA: "DK", DNF: "DNS", DNFREECS: "DNS",
+  GENG: "GEN", HANWHA: "HLE", HANWHALIFEESPORTS: "HLE",
+  KTROLSTER: "KT", NONGSHIM: "NS", NONGSHIMREDFORCE: "NS",
+  OKSAVINGSBANKBRION: "BRO", BRION: "BRO", T1ESPORTS: "T1"
+});
 const TEAM_LOGOS = Object.freeze({
   BFX: "assets/team-logos/BFX.png", BRO: "assets/team-logos/BRO.png", DK: "assets/team-logos/DK.png",
   DNS: "assets/team-logos/DNS.png", GEN: "assets/team-logos/GEN.png", HLE: "assets/team-logos/HLE.png",
@@ -57,6 +65,65 @@ function sortMatches(matches) {
   return [...matches].sort((a, b) => matchSortKey(a).localeCompare(matchSortKey(b)));
 }
 
+function canonicalTeamCode(value) {
+  const normalized = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return TEAM_CODE_ALIASES[normalized] || normalized.slice(0, 3);
+}
+
+function matchFallbackIdentity(match) {
+  const codes = [match.blueCode || match.blue, match.redCode || match.red]
+    .map(canonicalTeamCode)
+    .sort();
+  return JSON.stringify([
+    match.date || "",
+    codes,
+    match.competition || match.league || "",
+    match.time || "—"
+  ]);
+}
+
+function matchIdentityKeys(match) {
+  const keys = [];
+  if (match.matchId) keys.push(`official:${String(match.matchId)}`);
+  keys.push(`fallback:${matchFallbackIdentity(match)}`);
+  return keys;
+}
+
+function recordQuality(match) {
+  return [
+    Boolean(match.matchId),
+    match.blueScore != null && match.redScore != null,
+    match.status === "completed",
+    match.time != null && match.time !== "—",
+    (match.gameIds || []).length,
+    match.league === "LCK"
+  ];
+}
+
+function compareQuality(left, right) {
+  const a = recordQuality(left);
+  const b = recordQuality(right);
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return a[index] ? 1 : -1;
+  }
+  return 0;
+}
+
+function mergeMatchRecord(existing, incoming) {
+  const preferred = compareQuality(existing, incoming) >= 0 ? existing : incoming;
+  const fallback = preferred === existing ? incoming : existing;
+  const merged = { ...preferred };
+  Object.entries(fallback).forEach(([key, value]) => {
+    if (value == null || value === "" || value === "—"
+      || (Array.isArray(value) && !value.length)) return;
+    if (merged[key] == null || merged[key] === "" || merged[key] === "—"
+      || (Array.isArray(merged[key]) && !merged[key].length)) {
+      merged[key] = value;
+    }
+  });
+  return merged;
+}
+
 function renderPeriodRange(range) {
   $("#period-range").textContent = formatRange(range);
   const browsingWeek = state.activeTab !== "today";
@@ -83,7 +150,7 @@ function renderMatches() {
     return `<article class="match-card ${state.expandedMatchId === match.id ? "is-expanded" : ""}" data-match-key="${escapeHtml(match.id)}" tabindex="0" aria-expanded="${state.expandedMatchId === match.id}">
       <div class="match-meta"><time datetime="${escapeHtml(match.date)}">${escapeHtml(dateFormatter.format(dateFromKey(match.date)))}</time><strong>${escapeHtml(match.time)}</strong><span>${escapeHtml(match.league)}</span><span>${escapeHtml(match.stage)}</span></div>
       <div class="team-column team-one">${teamMarkup(match.blue, match.blueCode, match.blueLogo, match.blueScore, completed && match.blueScore < match.redScore)}</div>
-      <div class="match-center"><span class="series">BEST OF ${escapeHtml(match.series.replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${match.blueScore ?? "—"} - ${match.redScore ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(match.status)}">${live ? "● Live" : escapeHtml(match.status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
+      <div class="match-center"><span class="series">BEST OF ${escapeHtml(String(match.series || "BO3").replace("BO", ""))}</span><span class="match-series-score">${escapeHtml(`${match.blueScore ?? "—"} - ${match.redScore ?? "—"}`)}</span><strong class="versus">VS</strong><span class="status ${escapeHtml(match.status)}">${live ? "● Live" : escapeHtml(match.status)}</span>${match.link ? `<a class="source-link" href="${escapeHtml(match.link)}" target="_blank" rel="noreferrer">Leaguepedia ↗</a>` : ""}</div>
       <div class="team-column team-two">${teamMarkup(match.red, match.redCode, match.redLogo, match.redScore, completed && match.redScore < match.blueScore)}</div>
       ${state.expandedMatchId === match.id ? `<section class="match-details">${renderMatchDetails(match)}</section>` : ""}
     </article>`;
@@ -107,9 +174,9 @@ function teamMarkup(name, code, logo, score, dimScore) {
 }
 
 function isTeamMatch(match, team) {
-  const wanted = team.toUpperCase();
+  const wanted = canonicalTeamCode(team);
   return [match.blueCode, match.redCode, match.blue, match.red]
-    .some((value) => String(value || "").toUpperCase() === wanted);
+    .some((value) => canonicalTeamCode(value) === wanted);
 }
 
 function loadedScheduleRange() {
@@ -198,9 +265,35 @@ async function loadMatchDetails(match) {
 }
 
 function mergeMatches(matches) {
-  const deduped = new Map();
-  matches.filter(Boolean).forEach((match) => deduped.set(match.id || `${match.date}-${match.blue}-${match.red}`, match));
-  return sortMatches([...deduped.values()]);
+  const deduped = [];
+  const indexes = new Map();
+  matches.filter(Boolean).forEach((match) => {
+    const existingIndex = matchIdentityKeys(match)
+      .map((key) => indexes.get(key))
+      .find((index) => index != null);
+    const index = existingIndex == null ? deduped.length : existingIndex;
+    deduped[index] = existingIndex == null
+      ? match
+      : mergeMatchRecord(deduped[index], match);
+    matchIdentityKeys(deduped[index]).forEach((key) => indexes.set(key, index));
+  });
+  return sortMatches(deduped);
+}
+
+function normalizeRanges(ranges) {
+  const ordered = ranges
+    .filter((range) => range?.from && range?.to && range.from <= range.to)
+    .map((range) => ({ from: range.from, to: range.to }))
+    .sort((a, b) => a.from.localeCompare(b.from));
+  return ordered.reduce((merged, range) => {
+    const previous = merged[merged.length - 1];
+    if (previous && shiftDate(previous.to, 1) >= range.from) {
+      previous.to = previous.to > range.to ? previous.to : range.to;
+    } else {
+      merged.push(range);
+    }
+    return merged;
+  }, []);
 }
 
 function saveBatches() {
@@ -212,10 +305,11 @@ function saveBatches() {
 
 function loadBatches() {
   try {
+    localStorage.removeItem(LEGACY_BATCH_KEY);
     const saved = JSON.parse(localStorage.getItem(BATCH_KEY) || "null");
     if (saved?.matches) {
       state.matches = mergeMatches(saved.matches);
-      state.ranges = saved.ranges || [];
+      state.ranges = normalizeRanges(saved.ranges || []);
     }
   } catch (error) { console.warn("Stored schedule cache could not be read.", error); }
 }
@@ -224,16 +318,30 @@ function rangeContains(date) {
   return state.ranges.some((range) => range.from <= date && range.to >= date);
 }
 
+function rangeContainsInterval(from, to) {
+  let cursor = from;
+  for (const range of normalizeRanges(state.ranges)) {
+    if (range.to < cursor) continue;
+    if (range.from > cursor) return false;
+    cursor = shiftDate(range.to, 1);
+    if (cursor > to) return true;
+  }
+  return cursor > to;
+}
+
 async function fetchBatch(from, to) {
-  if (state.loadingBatch || rangeContains(from) && rangeContains(to)) return;
+  if (state.loadingBatch || rangeContainsInterval(from, to)) return;
   state.loadingBatch = true; updateBatchStatus();
   try {
     const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${encodeURIComponent(MATCH_TEAM)}`;
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Schedule unavailable (${response.status})`);
     const payload = await response.json();
-    state.matches = mergeMatches([...state.matches, ...(payload.matches || [])]);
-    state.ranges.push({ from, to }); state.ranges = state.ranges.slice(-12);
+    state.matches = mergeMatches([
+      ...state.matches.filter((match) => match.date < from || match.date > to),
+      ...(payload.matches || [])
+    ]);
+    state.ranges = normalizeRanges([...state.ranges, { from, to }]).slice(-12);
     state.scheduleStale = false;
     saveBatches();
   } catch (error) {
