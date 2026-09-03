@@ -73,13 +73,14 @@ def parse_score(value):
 
 
 def extract_scores(row, team_cells):
+    score_pattern = r'class="[^"]*\b(?:matchlist-)?score\b[^"]*"[^>]*>(.*?)</'
     scores = [
         parse_score(re.search(
-            r'class="[^"]*\bmatchlist-score\b[^"]*"[^>]*>\s*([^<]+)',
+            score_pattern,
             cell,
             re.DOTALL,
         ).group(1))
-        if re.search(r'class="[^"]*\bmatchlist-score\b[^"]*"[^>]*>\s*([^<]+)', cell, re.DOTALL)
+        if re.search(score_pattern, cell, re.DOTALL)
         else None
         for cell in team_cells
     ]
@@ -89,13 +90,21 @@ def extract_scores(row, team_cells):
     score_values = [
         parse_score(match.group(1))
         for match in re.finditer(
-            r'class="[^"]*\bmatchlist-score\b[^"]*"[^>]*>\s*([^<]+)',
+            score_pattern,
             row,
             re.DOTALL,
         )
     ]
     if len(score_values) >= 2:
         return score_values[:2]
+
+    attribute_result = re.search(
+        r'\bdata-(?:score|result)\s*=\s*["\']\s*([0-9]+)\s*[-–—:]\s*([0-9]+)',
+        row,
+        re.IGNORECASE,
+    )
+    if attribute_result:
+        return [int(attribute_result.group(1)), int(attribute_result.group(2))]
 
     text = html_module.unescape(re.sub(r"<[^>]+>", " ", row))
     result = re.search(r"\b([0-9]+)\s*[-–—:]\s*([0-9]+)\b", text)
@@ -111,6 +120,13 @@ def has_completed_result(scores, row):
             re.sub(r"<[^>]+>", " ", row)
         ))
     )
+
+
+def extract_series(row, scores):
+    series_match = re.search(r"\b(?:BO|BEST\s+OF\s*)([357])\b", row, re.IGNORECASE)
+    if series_match:
+        return f"BO{series_match.group(1)}"
+    return "BO5" if any(score is not None and score >= 3 for score in scores) else "BO3"
 
 
 def fetch_page(page):
@@ -235,9 +251,6 @@ def merge_match_record(existing, incoming):
             continue
         if merged.get(key) in (None, "", "—", []):
             merged[key] = value
-    if merged.get("blueScore") is None and merged.get("redScore") is None:
-        merged["blueScore"] = fallback.get("blueScore")
-        merged["redScore"] = fallback.get("redScore")
     if (
         merged.get("blueScore") is not None
         and merged.get("redScore") is not None
@@ -379,17 +392,16 @@ def load_official_index():
                 "teamIds": team_ids,
             }
             competition_match = re.search(
-                r'"(?:tournamentName|leagueName|eventName)":"([^"]+)"',
+                r'"(?:tournamentName|leagueName|eventName)"\s*:\s*"([^"]+)"',
                 chunk,
             )
             if competition_match:
                 entry["competition"] = competition_match.group(1)
             existing = entries_by_id.get(entry["matchId"])
             if existing:
-                existing["gameIds"] = list({
-                    (game["id"], game["number"]): game
-                    for game in existing["gameIds"] + entry["gameIds"]
-                }.values())
+                existing["gameIds"] = merge_game_ids(
+                    existing["gameIds"], entry["gameIds"]
+                )
                 existing["teamIds"].update(entry["teamIds"])
                 if entry.get("competition") and not existing.get("competition"):
                     existing["competition"] = entry["competition"]
@@ -414,6 +426,26 @@ def load_official_index():
         "by_id": by_id,
     })
     return OFFICIAL_CACHE
+
+
+def merge_game_ids(existing, incoming):
+    merged = {}
+    for game in (existing or []) + (incoming or []):
+        if not isinstance(game, dict) or not game.get("id"):
+            continue
+        key = (str(game["id"]), game.get("number"))
+        previous = merged.get(key)
+        if not previous or game_state_quality(game) > game_state_quality(previous):
+            merged[key] = game
+    return list(merged.values())
+
+
+def game_state_quality(game):
+    state = str(game.get("state", "")).lower()
+    return (
+        state in {"completed", "complete", "finished", "ended"},
+        state in {"inprogress", "in_progress", "live"},
+    )
 
 
 def normalize_official_payload(payload):
@@ -522,10 +554,11 @@ def parse_matches(league, page, html, official_index=None):
                 "redLogo": extract_logo(team_cells[1]) if len(team_cells) > 1 else None,
                 "blueScore": scores[0],
                 "redScore": scores[1],
-                "series": "BO3",
+                "series": extract_series(row, scores),
                 "source": "Leaguepedia",
                 "link": f"https://lol.fandom.com/wiki/{quote(page)}",
                 "competition": league,
+                "officialLinkStatus": "unmatched",
             }
         source_competition = match["competition"]
         match["id"] = "local:" + "|".join(map(str, match_fallback_identity(match)[1:]))
@@ -543,6 +576,7 @@ def parse_matches(league, page, html, official_index=None):
             if source_competition != "LCK" and official.get("competition"):
                 match["competition"] = official["competition"]
             match["id"] = official["matchId"]
+            match["officialLinkStatus"] = "linked"
         match["teams"] = {
             "blue": {"name": match["blue"], "code": match["blueCode"], "logo": match["blueLogo"]},
             "red": {"name": match["red"], "code": match["redCode"], "logo": match["redLogo"]},
@@ -657,7 +691,14 @@ def normalize_game_details(game, window, details, team_ids):
         team_metadata = metadata.get(metadata_key, {})
         if not isinstance(team_metadata, dict):
             team_metadata = {}
-        team_code = team_ids.get(team_metadata.get("esportsTeamId"), "TBD")
+        team_identifier = (
+            team_metadata.get("esportsTeamId")
+            or team_metadata.get("teamId")
+            or team_metadata.get("id")
+        )
+        team_code = team_ids.get(team_identifier) or team_ids.get(
+            str(team_identifier), "TBD"
+        )
         participants = []
         player_metadata = team_metadata.get("participantMetadata", [])
         if not isinstance(player_metadata, list):
@@ -776,12 +817,18 @@ def load_game_details(match_id):
 
 
 def parse_start(value):
-    for pattern in ("%d %B %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S %z"):
+    value = html_module.unescape(str(value or "")).strip()
+    for pattern in (
+        "%d %B %Y %H:%M:%S %z",
+        "%d %b %Y %H:%M:%S %z",
+        "%d %B %Y %H:%M %z",
+        "%d %b %Y %H:%M %z",
+    ):
         try:
             return datetime.strptime(value, pattern)
         except ValueError:
             pass
-    return datetime.fromisoformat(value.replace(" ", "T"))
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def load_matches():
