@@ -41,6 +41,7 @@ TEAM_CODE_ALIASES = {
     "DNF": "DNS",
     "DRX": "DRX",
     "GENG": "GEN",
+    "GENGESPORTS": "GEN",
     "GEN.G": "GEN",
     "GEN.GESPORTS": "GEN",
     "HANWHALIFEESPORTS": "HLE",
@@ -70,6 +71,35 @@ def parse_score(value):
         return None
     match = re.search(r"\b([0-9]+)\b", html_module.unescape(str(value)))
     return int(match.group(1)) if match else None
+
+
+UNRESOLVED_OPPONENT_RE = re.compile(
+    r"^(?:TBD|TBC|TBA|UNKNOWN|N/?A|"
+    r"TO\s+BE\s+DETERMINED|TO\s+BE\s+CONFIRMED|"
+    r"(?:WINNER|LOSER)\s+OF\b|"
+    r"(?:TEAM|SEED|SLOT|BRACKET)\s*[\w#-]*)$",
+    re.IGNORECASE,
+)
+
+
+def is_unresolved_opponent(value):
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    return not normalized or bool(UNRESOLVED_OPPONENT_RE.fullmatch(normalized))
+
+
+def valid_series_score(scores, teams=None, series=None):
+    if not isinstance(scores, (list, tuple)) or len(scores) != 2:
+        return False
+    if teams and any(is_unresolved_opponent(team) for team in teams):
+        return False
+    if any(not isinstance(score, int) or score < 0 or score > 3 for score in scores):
+        return False
+    target = 3 if str(series or "").upper() == "BO5" else 2
+    return max(scores) == target and min(scores) < target
+
+
+def sanitize_series_score(scores, teams, series):
+    return list(scores) if valid_series_score(scores, teams, series) else [None, None]
 
 
 def extract_scores(row, team_cells):
@@ -113,12 +143,10 @@ def extract_scores(row, team_cells):
     return scores
 
 
-def has_completed_result(scores, row):
-    return all(score is not None for score in scores) or bool(
-        re.search(r"\b(completed|finished|final|result)\b", row, re.IGNORECASE)
-        and re.search(r"\b[0-9]+\s*[-–—:]\s*[0-9]+\b", html_module.unescape(
-            re.sub(r"<[^>]+>", " ", row)
-        ))
+def has_completed_result(scores, row, teams=None, series=None):
+    return valid_series_score(scores, teams, series) and bool(
+        all(score is not None for score in scores)
+        or re.search(r"\b(completed|finished|final|result)\b", row, re.IGNORECASE)
     )
 
 
@@ -314,6 +342,90 @@ def select_active_stage(stage_matches):
     )
 
 
+def parse_official_events(payload):
+    normalized = normalize_official_payload(payload)
+    decoder = json.JSONDecoder()
+    marker = re.compile(r'"__typename"\s*:\s*"EventMatch"')
+    events = []
+    seen_ids = set()
+    for match in marker.finditer(normalized):
+        starts = [item.start() for item in re.finditer(r"\{", normalized[:match.start() + 1])]
+        for start in reversed(starts):
+            try:
+                candidate, _ = decoder.raw_decode(normalized[start:])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(candidate, dict) or candidate.get("__typename") != "EventMatch":
+                continue
+            event_id = candidate.get("id") or candidate.get("matchId")
+            if event_id and str(event_id) not in seen_ids:
+                seen_ids.add(str(event_id))
+                events.append(candidate)
+            break
+    return events
+
+
+def normalize_official_event(event):
+    event_id = event.get("id") or event.get("matchId")
+    start_value = event.get("startTime") or event.get("start_time")
+    if not event_id or not start_value:
+        return None
+    start = parse_start(str(start_value).replace("Z", "+0000"))
+    raw_teams = event.get("teams") or event.get("matchTeams") or []
+    if not isinstance(raw_teams, list):
+        return None
+    team_entries = {}
+    for team in raw_teams:
+        if not isinstance(team, dict):
+            continue
+        team_id = team.get("id") or team.get("teamId") or team.get("esportsTeamId")
+        code = team.get("code") or team.get("shortCode") or team.get("name")
+        if team_id and code and not is_unresolved_opponent(code):
+            team_entries[str(team_id)] = team_code(code)
+    if len(set(team_entries.values())) != 2:
+        return None
+    team_ids = {}
+    for team_id, code in team_entries.items():
+        team_ids[team_id] = code
+        team_ids[team_id.rsplit(":", 1)[-1]] = code
+    raw_games = event.get("games") or event.get("gameIds") or []
+    if not isinstance(raw_games, list):
+        raw_games = []
+    games = []
+    game_ids = set()
+    for index, game in enumerate(raw_games, 1):
+        if not isinstance(game, dict):
+            continue
+        game_id = game.get("id") or game.get("gameId")
+        if not game_id or str(game_id) in game_ids:
+            continue
+        game_ids.add(str(game_id))
+        number = game.get("number") or game.get("gameNumber") or index
+        try:
+            number = int(number)
+        except (TypeError, ValueError):
+            number = index
+        games.append({
+            "id": str(game_id),
+            "number": number,
+            "state": game.get("state") or game.get("status"),
+        })
+    entry = {
+        "matchId": str(event_id),
+        "startTime": start.isoformat(),
+        "gameIds": games,
+        "teamIds": team_ids,
+    }
+    competition = (
+        event.get("tournamentName")
+        or event.get("leagueName")
+        or event.get("eventName")
+    )
+    if competition:
+        entry["competition"] = competition
+    return entry
+
+
 def load_official_index():
     now = datetime.now(timezone.utc)
     if OFFICIAL_CACHE["expires"] > now:
@@ -321,82 +433,20 @@ def load_official_index():
     by_key = {}
     by_date = {}
     by_id = {}
+    diagnostics = {"events": 0, "normalized": 0, "skipped": 0}
     try:
-        html = normalize_official_payload(fetch_official_schedule())
-        marker = re.compile(
-            r'\{\s*"__typename"\s*:\s*"EventMatch"'
-        )
-        starts = [match.start() for match in marker.finditer(html)]
-        chunks = [
-            html[start:end]
-            for start, end in zip(starts, starts[1:] + [len(html)])
-        ]
+        events = parse_official_events(fetch_official_schedule())
+        diagnostics["events"] = len(events)
         entries_by_id = {}
-        for chunk in chunks:
-            event_match = re.search(
-                r'\{\s*"__typename"\s*:\s*"EventMatch".*?"id"\s*:\s*"([^"]+)"',
-                chunk,
-                re.DOTALL,
-            )
-            start_match = re.search(r'"startTime"\s*:\s*"([^"]+)"', chunk)
-            if not event_match or not start_match:
+        for event in events:
+            try:
+                entry = normalize_official_event(event)
+            except (TypeError, ValueError, KeyError, IndexError):
+                entry = None
+            if not entry:
+                diagnostics["skipped"] += 1
                 continue
-            team_markers = list(re.finditer(
-                r'"__typename"\s*:\s*"MatchTeam"',
-                chunk,
-            ))
-            team_entries = {}
-            for index, team_marker in enumerate(team_markers):
-                end = team_markers[index + 1].start() if index + 1 < len(team_markers) else len(chunk)
-                team_fragment = chunk[team_marker.start():end]
-                team_id = re.search(r'"id"\s*:\s*"([^"]+)"', team_fragment)
-                team_name = re.search(r'"name"\s*:\s*"([^"]+)"', team_fragment)
-                team_code_match = re.search(r'"code"\s*:\s*"([^"]+)"', team_fragment)
-                code = team_code_match.group(1) if team_code_match else (
-                    team_name.group(1) if team_name else ""
-                )
-                if team_id and code:
-                    team_entries[team_id.group(1)] = team_code(code)
-            if len(set(team_entries.values())) != 2:
-                continue
-            team_ids = {}
-            for team_id, code in team_entries.items():
-                team_ids[team_id] = code
-                team_ids[team_id.rsplit(":", 1)[-1]] = code
-            game_markers = list(re.finditer(
-                r'"__typename"\s*:\s*"Game"',
-                chunk,
-            ))
-            games = []
-            game_ids = set()
-            for index, game_marker in enumerate(game_markers):
-                end = game_markers[index + 1].start() if index + 1 < len(game_markers) else len(chunk)
-                game_fragment = chunk[game_marker.start():end]
-                game_id = re.search(r'"id"\s*:\s*"([^"]+)"', game_fragment)
-                state = re.search(r'"state"\s*:\s*"([^"]+)"', game_fragment)
-                number = re.search(r'"number"\s*:\s*(\d+)', game_fragment)
-                if game_id and state and number and game_id.group(1) not in game_ids:
-                    game_ids.add(game_id.group(1))
-                    games.append({
-                        "id": game_id.group(1),
-                        "number": int(number.group(1)),
-                        "state": state.group(1),
-                    })
-            start = parse_start(start_match.group(1).replace("Z", "+0000"))
-            local_date = start.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-            codes = tuple(sorted(set(team_ids.values())))
-            entry = {
-                "matchId": event_match.group(1),
-                "startTime": start.isoformat(),
-                "gameIds": games,
-                "teamIds": team_ids,
-            }
-            competition_match = re.search(
-                r'"(?:tournamentName|leagueName|eventName)"\s*:\s*"([^"]+)"',
-                chunk,
-            )
-            if competition_match:
-                entry["competition"] = competition_match.group(1)
+            diagnostics["normalized"] += 1
             existing = entries_by_id.get(entry["matchId"])
             if existing:
                 existing["gameIds"] = merge_game_ids(
@@ -419,11 +469,13 @@ def load_official_index():
             by_id[entry["matchId"]] = entry
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"[LoL Esports] official schedule index unavailable: {error}")
+    diagnostics["indexed"] = len(by_id)
     OFFICIAL_CACHE.update({
         "expires": now + timedelta(minutes=10),
         "by_key": by_key,
         "by_date": by_date,
         "by_id": by_id,
+        "diagnostics": diagnostics,
     })
     return OFFICIAL_CACHE
 
@@ -459,6 +511,8 @@ def find_official_match(official_index, date, codes, match_time=None):
     index = official_index or {}
     by_key = index.get("by_key", index) if isinstance(index, dict) else {}
     normalized_codes = tuple(sorted(team_code(code) for code in codes))
+    if any(is_unresolved_opponent(code) for code in normalized_codes):
+        return None
     if len(set(normalized_codes)) != 2:
         return None
     keyed = by_key.get((date, normalized_codes), [])
@@ -531,12 +585,16 @@ def parse_matches(league, page, html, official_index=None):
         ]
         if len(teams) != 2 or any(not team for team in teams):
             continue
-        scores = extract_scores(row, team_cells)
+        raw_scores = extract_scores(row, team_cells)
+        raw_series = extract_series(row, raw_scores)
+        scores = sanitize_series_score(raw_scores, teams, raw_series)
         start_match = re.search(r'class="countdowndate">([^<]+)</span>', row)
         start = parse_start(start_match.group(1)) if start_match else None
         date = start.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d") if start else fallback_date
         time = start.astimezone(timezone(timedelta(hours=8))).strftime("%H:%M") if start else "—"
-        status = "completed" if has_completed_result(scores, row) else (
+        status = "completed" if has_completed_result(
+            scores, row, teams, raw_series
+        ) else (
             "live" if re.search(r"\blive\b|\bin[- ]progress\b", row, re.IGNORECASE) else "upcoming"
         )
         match = {
@@ -554,7 +612,7 @@ def parse_matches(league, page, html, official_index=None):
                 "redLogo": extract_logo(team_cells[1]) if len(team_cells) > 1 else None,
                 "blueScore": scores[0],
                 "redScore": scores[1],
-                "series": extract_series(row, scores),
+                "series": raw_series,
                 "source": "Leaguepedia",
                 "link": f"https://lol.fandom.com/wiki/{quote(page)}",
                 "competition": league,
