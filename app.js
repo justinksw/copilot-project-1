@@ -302,7 +302,7 @@ function normalizeRanges(ranges) {
 
 function saveBatches() {
   try {
-    localStorage.setItem(BATCH_KEY, JSON.stringify({ version: 2, ranges: state.ranges, matches: state.matches }));
+    localStorage.setItem(BATCH_KEY, JSON.stringify({ version: 3, ranges: state.ranges, matches: state.matches }));
     localStorage.setItem(HISTORY_KEY, JSON.stringify(state.matches.slice(-500)));
   } catch (error) { console.warn("Schedule cache could not be saved.", error); }
 }

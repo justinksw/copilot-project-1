@@ -374,7 +374,7 @@ def find_official_match(official_index, date, codes, match_time=None):
     if len(keyed_ids) > 1:
         timed = [
             entry for entry in keyed
-            if datetime.fromisoformat(entry["startTime"]).astimezone(HONG_KONG).strftime("%H:%M") == match_time
+            if official_local_time(entry) == match_time
         ] if match_time else []
         timed_ids = {entry.get("matchId") for entry in timed if entry.get("matchId")}
         return timed[0] if len(timed_ids) == 1 else None
@@ -390,10 +390,17 @@ def find_official_match(official_index, date, codes, match_time=None):
         return exact[0]
     timed = [
         entry for entry in exact
-        if datetime.fromisoformat(entry["startTime"]).astimezone(HONG_KONG).strftime("%H:%M") == match_time
+        if official_local_time(entry) == match_time
     ] if match_time else []
     timed_ids = {entry.get("matchId") for entry in timed if entry.get("matchId")}
     return timed[0] if len(timed_ids) == 1 else None
+
+
+def official_local_time(entry):
+    try:
+        return datetime.fromisoformat(entry["startTime"]).astimezone(HONG_KONG).strftime("%H:%M")
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def parse_matches(league, page, html, official_index=None):
@@ -515,7 +522,10 @@ def fetch_feed(path, starting_time=None):
 def useful_details(payload):
     if not isinstance(payload, dict) or not isinstance(payload.get("frames"), list) or not payload["frames"]:
         return False
-    participants = payload["frames"][-1].get("participants", [])
+    frame = payload["frames"][-1]
+    if not isinstance(frame, dict):
+        return False
+    participants = frame.get("participants", [])
     if not isinstance(participants, list):
         return False
     return any(
@@ -529,7 +539,7 @@ def useful_details(payload):
 
 
 def determine_game_winner(teams, state):
-    if state not in {"finished", "completed"}:
+    if str(state or "").lower() not in {"finished", "completed"}:
         return None
     ranked = sorted(
         teams.values(),
@@ -567,6 +577,8 @@ def normalize_game_details(game, window, details, team_ids):
         raise ValueError("Incomplete match detail snapshot")
     window_frame = window_frames[-1]
     details_frame = detail_frames[-1]
+    if not isinstance(window_frame, dict) or not isinstance(details_frame, dict):
+        raise ValueError("Incomplete match detail snapshot")
     detail_participants = {
         participant["participantId"]: participant
         for participant in details_frame.get("participants", [])
@@ -575,7 +587,11 @@ def normalize_game_details(game, window, details, team_ids):
     window_participants = {
         participant["participantId"]: participant
         for side in ("blueTeam", "redTeam")
-        for participant in window_frame.get(side, {}).get("participants", [])
+        for participant in (
+            window_frame.get(side, {}).get("participants", [])
+            if isinstance(window_frame.get(side, {}), dict)
+            else []
+        )
         if isinstance(participant, dict) and "participantId" in participant
     }
     teams = {}
@@ -587,12 +603,22 @@ def normalize_game_details(game, window, details, team_ids):
             team_metadata = {}
         team_code = team_ids.get(team_metadata.get("esportsTeamId"), "TBD")
         participants = []
-        for player in team_metadata.get("participantMetadata", []):
+        player_metadata = team_metadata.get("participantMetadata", [])
+        if not isinstance(player_metadata, list):
+            player_metadata = []
+        for player in player_metadata:
             if not isinstance(player, dict) or "participantId" not in player:
                 continue
             participant_id = player["participantId"]
             detail = detail_participants.get(participant_id, {})
             live = window_participants.get(participant_id, {})
+            if not isinstance(detail, dict):
+                detail = {}
+            if not isinstance(live, dict):
+                live = {}
+            items = detail.get("items", [])
+            if not isinstance(items, list):
+                items = []
             participants.append(
                 {
                     "player": player.get("summonerName", "Unknown"),
@@ -604,7 +630,7 @@ def normalize_game_details(game, window, details, team_ids):
                     "assists": detail.get("assists", 0),
                     "gold": detail.get("totalGoldEarned", live.get("totalGold", 0)),
                     "cs": detail.get("creepScore", live.get("creepScore", 0)),
-                    "items": detail.get("items", []),
+                    "items": items,
                 }
             )
         team_stats = window_frame.get(window_key, {})
@@ -626,8 +652,8 @@ def normalize_game_details(game, window, details, team_ids):
     patch_version = ".".join(patch_parts[:2] + ["1"]) if len(patch_parts) >= 2 else "16.15.1"
     winner = determine_game_winner(teams, game.get("state") or window_frame.get("gameState"))
     return {
-        "number": game["number"],
-        "state": game["state"],
+        "number": game.get("number"),
+        "state": game.get("state"),
         "timestamp": details_frame.get("rfc460Timestamp"),
         "patch": patch_version,
         "winner": winner,
@@ -641,13 +667,22 @@ def load_game_details(match_id):
     if not match:
         raise ValueError("Match details are not linked for this card")
     games = []
-    for game in match.get("gameIds", []):
+    for game in match.get("gameIds") or []:
+        if not isinstance(game, dict):
+            continue
         game_state = str(game.get("state", "")).lower()
         if game_state not in {"completed", "finished", "inprogress", "in_progress", "live"}:
             continue
+        if not game.get("id"):
+            games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
+            continue
         detail = None
         window = None
-        start = datetime.fromisoformat(match["startTime"])
+        try:
+            start = datetime.fromisoformat(match["startTime"])
+        except (KeyError, TypeError, ValueError):
+            games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
+            continue
         probe_offsets = (
             (360, 300, 240, 180, 120, 60, 30, 15, 0)
             if game_state in {"completed", "finished"}
@@ -661,7 +696,7 @@ def load_game_details(match_id):
                 try:
                     candidate_detail = detail_future.result()
                     candidate_window = window_future.result()
-                except (OSError, ValueError, json.JSONDecodeError):
+                except (OSError, ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
                     continue
                 if useful_details(candidate_detail) and isinstance(candidate_window, dict) and candidate_window.get("frames"):
                     detail = candidate_detail
