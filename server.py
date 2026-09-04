@@ -348,11 +348,47 @@ def select_active_stage(stage_matches):
 
 
 def parse_official_events(payload):
-    normalized = normalize_official_payload(payload)
-    decoder = json.JSONDecoder()
-    marker = re.compile(r'"__typename"\s*:\s*"EventMatch"')
     events = []
     seen_ids = set()
+
+    def add_event(candidate):
+        if not isinstance(candidate, dict) or candidate.get("__typename") != "EventMatch":
+            return
+        nested_match = candidate.get("match")
+        event_id = (
+            nested_match.get("id")
+            if isinstance(nested_match, dict) and nested_match.get("id")
+            else candidate.get("id") or candidate.get("matchId")
+        )
+        if event_id and str(event_id) not in seen_ids:
+            seen_ids.add(str(event_id))
+            events.append(candidate)
+
+    def visit(value):
+        if isinstance(value, dict):
+            add_event(value)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, str) and "EventMatch" in value:
+            try:
+                visit(json.loads(value))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+
+    raw_payload = html_module.unescape(payload or "")
+    try:
+        visit(json.loads(raw_payload))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    if events:
+        return events
+
+    normalized = normalize_official_payload(raw_payload)
+    decoder = json.JSONDecoder()
+    marker = re.compile(r'"__typename"\s*:\s*"EventMatch"')
     for match in marker.finditer(normalized):
         starts = [item.start() for item in re.finditer(r"\{", normalized[:match.start() + 1])]
         for start in reversed(starts):
@@ -360,31 +396,58 @@ def parse_official_events(payload):
                 candidate, _ = decoder.raw_decode(normalized[start:])
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
-            if not isinstance(candidate, dict) or candidate.get("__typename") != "EventMatch":
-                continue
-            event_id = candidate.get("id") or candidate.get("matchId")
-            if event_id and str(event_id) not in seen_ids:
-                seen_ids.add(str(event_id))
-                events.append(candidate)
-            break
+            before_count = len(events)
+            visit(candidate)
+            if len(events) != before_count:
+                break
     return events
 
 
+def first_value(sources, *keys):
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
+def object_entries(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        if any(key in value for key in ("id", "teamId", "gameId")):
+            return [value]
+        return list(value.values())
+    return []
+
+
+def nested_object(value, key):
+    nested = value.get(key) if isinstance(value, dict) else None
+    return nested if isinstance(nested, dict) else value
+
+
 def normalize_official_event(event):
-    event_id = event.get("id") or event.get("matchId")
-    start_value = event.get("startTime") or event.get("start_time")
+    if not isinstance(event, dict):
+        return None
+    match = event.get("match")
+    sources = [match, event] if isinstance(match, dict) else [event]
+    event_id = first_value(sources, "id", "matchId")
+    start_value = first_value(sources, "startTime", "start_time", "scheduledStartTime")
     if not event_id or not start_value:
         return None
     start = parse_start(str(start_value).replace("Z", "+0000"))
-    raw_teams = event.get("teams") or event.get("matchTeams") or []
-    if not isinstance(raw_teams, list):
-        return None
+    raw_teams = first_value(sources, "teams", "matchTeams") or []
     team_entries = {}
-    for team in raw_teams:
+    for raw_team in object_entries(raw_teams):
+        team = nested_object(raw_team, "team")
         if not isinstance(team, dict):
             continue
-        team_id = team.get("id") or team.get("teamId") or team.get("esportsTeamId")
-        code = team.get("code") or team.get("shortCode") or team.get("name")
+        team_sources = [team, raw_team] if team is not raw_team else [team]
+        team_id = first_value(team_sources, "id", "teamId", "esportsTeamId")
+        code = first_value(team_sources, "code", "shortCode", "name", "displayName")
         if team_id and code and not is_unresolved_opponent(code):
             team_entries[str(team_id)] = team_code(code)
     if len(set(team_entries.values())) != 2:
@@ -393,28 +456,32 @@ def normalize_official_event(event):
     for team_id, code in team_entries.items():
         team_ids[team_id] = code
         team_ids[team_id.rsplit(":", 1)[-1]] = code
-    raw_games = event.get("games") or event.get("gameIds") or []
-    if not isinstance(raw_games, list):
-        raw_games = []
+    raw_games = first_value(sources, "games", "gameIds") or []
     games = []
     game_ids = set()
-    for index, game in enumerate(raw_games, 1):
+    for index, raw_game in enumerate(object_entries(raw_games), 1):
+        game = nested_object(raw_game, "game")
         if not isinstance(game, dict):
             continue
-        game_id = game.get("id") or game.get("gameId")
+        game_sources = [game, raw_game] if game is not raw_game else [game]
+        game_id = first_value(game_sources, "id", "gameId")
         if not game_id or str(game_id) in game_ids:
             continue
         game_ids.add(str(game_id))
-        number = game.get("number") or game.get("gameNumber") or index
+        number = first_value(game_sources, "number", "gameNumber", "sequenceNumber") or index
         try:
             number = int(number)
         except (TypeError, ValueError):
             number = index
-        games.append({
+        normalized_game = {
             "id": str(game_id),
             "number": number,
-            "state": game.get("state") or game.get("status"),
-        })
+            "state": first_value(game_sources, "state", "status"),
+        }
+        game_start = first_value(game_sources, "startTime", "start_time", "gameStartTime")
+        if game_start:
+            normalized_game["startTime"] = str(game_start)
+        games.append(normalized_game)
     entry = {
         "matchId": str(event_id),
         "startTime": start.isoformat(),
@@ -422,10 +489,14 @@ def normalize_official_event(event):
         "teamIds": team_ids,
     }
     competition = (
-        event.get("tournamentName")
-        or event.get("leagueName")
-        or event.get("eventName")
+        first_value(sources, "tournamentName", "leagueName", "eventName")
     )
+    if isinstance(competition, dict):
+        competition = first_value([competition], "name", "displayName")
+    if not competition:
+        league = first_value(sources, "league", "tournament")
+        if isinstance(league, dict):
+            competition = first_value([league], "name", "displayName")
     if competition:
         entry["competition"] = competition
     return entry
@@ -526,14 +597,9 @@ def find_official_match(official_index, date, codes, match_time=None):
     if isinstance(keyed, dict):
         keyed = [keyed]
     keyed_ids = {entry.get("matchId") for entry in keyed if entry.get("matchId")}
-    if match_time:
-        timed = [
-            entry for entry in keyed
-            if official_local_time(entry) == match_time
-        ]
-        timed_ids = {entry.get("matchId") for entry in timed if entry.get("matchId")}
-        if len(timed_ids) == 1:
-            return timed[0]
+    timed = nearest_official_match(keyed, match_time)
+    if timed:
+        return timed
     if len(keyed_ids) == 1:
         return keyed[0]
     if len(keyed_ids) > 1:
@@ -546,17 +612,39 @@ def find_official_match(official_index, date, codes, match_time=None):
         and wanted == set(candidate.get("teamIds", {}).values())
     ]
     exact_ids = {entry.get("matchId") for entry in exact if entry.get("matchId")}
-    if match_time:
-        timed = [
-            entry for entry in exact
-            if official_local_time(entry) == match_time
-        ]
-        timed_ids = {entry.get("matchId") for entry in timed if entry.get("matchId")}
-        if len(timed_ids) == 1:
-            return timed[0]
+    timed = nearest_official_match(exact, match_time)
+    if timed:
+        return timed
     if len(exact_ids) == 1:
         return exact[0]
     return None
+
+
+def nearest_official_match(entries, match_time):
+    if not isinstance(match_time, str) or not re.fullmatch(r"\d{2}:\d{2}", match_time):
+        return None
+    try:
+        local_minutes = int(match_time[:2]) * 60 + int(match_time[3:])
+    except ValueError:
+        return None
+    candidates = []
+    for entry in entries:
+        official_time = official_local_time(entry)
+        if not official_time:
+            continue
+        try:
+            official_minutes = int(official_time[:2]) * 60 + int(official_time[3:])
+        except (TypeError, ValueError):
+            continue
+        difference = abs(official_minutes - local_minutes)
+        if difference <= 90:
+            candidates.append((difference, str(entry.get("matchId", "")), entry))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
+    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+        return None
+    return candidates[0][2]
 
 
 def official_local_time(entry):
@@ -724,6 +812,52 @@ def determine_game_winner(teams, state):
     return ranked[0]["code"]
 
 
+def unavailable_game(game, reason):
+    messages = {
+        "not_started": "This game has not started.",
+        "feed_unavailable": "The official live-stats feed is unavailable.",
+        "invalid_snapshot": "The official live-stats snapshot is incomplete.",
+    }
+    return {
+        "number": game.get("number"),
+        "state": game.get("state"),
+        "available": False,
+        "reason": reason,
+        "message": messages.get(reason, "Game details are unavailable."),
+    }
+
+
+def probe_timestamps(game, match_start, completed):
+    timestamps = []
+
+    def add(value):
+        if value not in timestamps:
+            timestamps.append(value)
+
+    game_start = game.get("startTime")
+    if game_start:
+        try:
+            add(datetime.fromisoformat(
+                str(game_start).replace("Z", "+00:00")
+            ).isoformat().replace("+00:00", "Z"))
+        except ValueError:
+            pass
+    try:
+        start = datetime.fromisoformat(str(match_start).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return timestamps + [None]
+    offsets = (
+        (0, 15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 420, 480,
+         540, 600, 660, 720)
+        if completed else
+        (0, 15, 30, 60)
+    )
+    for offset in offsets:
+        add((start + timedelta(minutes=offset)).isoformat().replace("+00:00", "Z"))
+    add(None)
+    return timestamps
+
+
 def normalize_game_details(game, window, details, team_ids):
     metadata = window.get("gameMetadata", {}) if isinstance(window, dict) else {}
     window_frames = window.get("frames", []) if isinstance(window, dict) else []
@@ -823,43 +957,51 @@ def normalize_game_details(game, window, details, team_ids):
     }
 
 
-def load_game_details(match_id):
+def load_game_details(match_id, fallback_match=None):
     index = load_official_index()["by_id"]
     match = index.get(str(match_id)) or index.get(match_id)
+    if not match and isinstance(fallback_match, dict):
+        match = fallback_match
+    elif isinstance(fallback_match, dict) and len(
+        fallback_match.get("gameIds") or []
+    ) > len(match.get("gameIds") or []):
+        match = {
+            **match,
+            "gameIds": fallback_match["gameIds"],
+            "startTime": match.get("startTime") or fallback_match["startTime"],
+            "teamIds": match.get("teamIds") or fallback_match["teamIds"],
+        }
     if not match:
         raise ValueError("Match details are not linked for this card")
+    if not match.get("gameIds"):
+        return {
+            "matchId": match_id,
+            "games": [],
+            "message": "Official game IDs are not available for this match yet.",
+        }
     games = []
     for game in match.get("gameIds") or []:
         if not isinstance(game, dict):
             continue
         game_state = str(game.get("state", "")).lower()
         if not game.get("id"):
-            games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
+            games.append(unavailable_game(game, "invalid_snapshot"))
             continue
         if game_state not in {
             "completed", "complete", "finished", "ended",
             "inprogress", "in_progress", "live",
         }:
-            games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
+            games.append(unavailable_game(game, "not_started"))
             continue
         detail = None
         window = None
-        try:
-            start = datetime.fromisoformat(match["startTime"])
-        except (KeyError, TypeError, ValueError):
-            games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
-            continue
-        probe_offsets = (
-            (360, 300, 240, 180, 120, 60, 30, 15, 0, -15)
-            if game_state in {"completed", "complete", "finished", "ended"}
-            else (180, 120, 60, 30, 15, 0, -15)
-        )
+        saw_snapshot = False
         with ThreadPoolExecutor(max_workers=2) as executor:
-            timestamps = [
-                (start + timedelta(minutes=offset)).isoformat().replace("+00:00", "Z")
-                for offset in probe_offsets
-            ] + [None]
-            for timestamp in timestamps:
+            for timestamp in probe_timestamps(
+                game,
+                match.get("startTime"),
+                game_state in {"completed", "complete", "finished", "ended"},
+            ):
                 detail_future = executor.submit(fetch_feed, f"details/{game['id']}", timestamp)
                 window_future = executor.submit(fetch_feed, f"window/{game['id']}", timestamp)
                 try:
@@ -867,6 +1009,8 @@ def load_game_details(match_id):
                     candidate_window = window_future.result()
                 except (OSError, ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
                     continue
+                if isinstance(candidate_window, dict) and candidate_window.get("frames"):
+                    saw_snapshot = True
                 if useful_details(candidate_detail) and isinstance(candidate_window, dict) and candidate_window.get("frames"):
                     detail = candidate_detail
                     window = candidate_window
@@ -875,10 +1019,63 @@ def load_game_details(match_id):
             try:
                 games.append(normalize_game_details(game, window, detail, match.get("teamIds", {})))
             except (TypeError, KeyError, ValueError, IndexError):
-                games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
+                games.append(unavailable_game(game, "invalid_snapshot"))
         else:
-            games.append({"number": game.get("number"), "state": game.get("state"), "available": False})
+            games.append(unavailable_game(
+                game, "invalid_snapshot" if saw_snapshot else "feed_unavailable"
+            ))
     return {"matchId": match_id, "games": games}
+
+
+def detail_fallback_match(match_id, query):
+    try:
+        raw_games = json.loads(query.get("gameIds", [""])[0])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw_games, list) or not 1 <= len(raw_games) <= 5:
+        return None
+    games = []
+    seen_ids = set()
+    for number, raw_game in enumerate(raw_games, 1):
+        if not isinstance(raw_game, dict):
+            return None
+        game_id = raw_game.get("id") or raw_game.get("gameId")
+        if not isinstance(game_id, str) or not re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", game_id):
+            return None
+        if game_id in seen_ids:
+            continue
+        seen_ids.add(game_id)
+        games.append({
+            "id": game_id,
+            "number": raw_game.get("number") or raw_game.get("gameNumber") or number,
+            "state": raw_game.get("state") or raw_game.get("status"),
+            **(
+                {"startTime": raw_game["startTime"]}
+                if isinstance(raw_game.get("startTime"), str) else {}
+            ),
+        })
+    try:
+        start_time = datetime.fromisoformat(
+            query.get("startTime", [""])[0].replace("Z", "+00:00")
+        ).isoformat()
+    except (AttributeError, TypeError, ValueError):
+        return None
+    try:
+        raw_team_ids = json.loads(query.get("teamIds", ["{}"])[0])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw_team_ids = {}
+    team_ids = {
+        str(team_id): team_code(team)
+        for team_id, team in raw_team_ids.items()
+        if isinstance(team_id, str) and len(team_id) <= 128
+        and isinstance(team, str) and len(team) <= 128
+    } if isinstance(raw_team_ids, dict) and len(raw_team_ids) <= 8 else {}
+    return {
+        "matchId": str(match_id),
+        "startTime": start_time,
+        "gameIds": games,
+        "teamIds": team_ids,
+    }
 
 
 def parse_start(value):
@@ -1078,13 +1275,27 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path.path == "/api/match-details":
             match_id = parse_qs(path.query).get("matchId", [None])[0]
-            if not match_id:
-                self.send_error(400, "Missing match ID")
+            if not isinstance(match_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9:_-]{1,128}", match_id
+            ):
+                self.send_error(400, "Invalid match ID")
                 return
+            query = parse_qs(path.query)
+            refresh = query.get("refresh", [""])[0] == "1"
             try:
-                if match_id not in DETAIL_CACHE:
-                    DETAIL_CACHE[match_id] = load_game_details(match_id)
-                body = json.dumps(DETAIL_CACHE[match_id]).encode()
+                now = datetime.now(timezone.utc)
+                for cached_match_id, cached_value in list(DETAIL_CACHE.items()):
+                    if cached_value["expires"] <= now:
+                        del DETAIL_CACHE[cached_match_id]
+                cached = DETAIL_CACHE.get(match_id)
+                if refresh or not cached:
+                    DETAIL_CACHE[match_id] = {
+                        "expires": now + timedelta(minutes=1),
+                        "payload": load_game_details(
+                            match_id, detail_fallback_match(match_id, query)
+                        ),
+                    }
+                body = json.dumps(DETAIL_CACHE[match_id]["payload"]).encode()
             except (OSError, ValueError, json.JSONDecodeError) as error:
                 self.send_error(502, f"Match details unavailable: {error}")
                 return
