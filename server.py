@@ -637,7 +637,6 @@ def nearest_official_match(entries, match_time):
         except (TypeError, ValueError):
             continue
         difference = abs(official_minutes - local_minutes)
-        difference = min(difference, 1440 - difference)
         if difference <= 90:
             candidates.append((difference, str(entry.get("matchId", "")), entry))
     if not candidates:
