@@ -10,6 +10,7 @@ const context = {
   Map,
   Set,
   URL,
+  URLSearchParams,
   window: { NEXUS_API_BASE_URL: "", location: { hostname: "localhost" } },
   document: { querySelector: () => null }
 };
@@ -70,6 +71,22 @@ assert.strictEqual(context.mergeMatches([
   match,
   { ...match, id: "different-stale-id", matchId: undefined }
 ]).length, 1);
+assert.match(
+  context.matchDetailsUrl({
+    matchId: "42",
+    gameIds: [{ id: "1001", state: "completed" }],
+    startTime: "2026-08-30T04:00:00Z",
+    teamIds: { "team:1": "T1" }
+  }, true),
+  /gameIds=.*1001.*&startTime=.*&teamIds=.*&refresh=1$/
+);
+assert.match(
+  context.gameDetailMarkup(match, {
+    number: 1, available: false,
+    message: "The official live-stats feed is unavailable."
+  }),
+  /The official live-stats feed is unavailable\./
+);
 assert.strictEqual(context.mergeMatches([
   { ...match, matchId: undefined },
   match

@@ -250,12 +250,18 @@ function renderMatchDetails(match) {
   const details = state.details.get(match.id);
   if (!details) return `<p class="detail-message">Loading champion, item, and gold data…</p>`;
   const games = Array.isArray(details.games) ? details.games : [];
-  return games.length ? games.map((game) => gameDetailMarkup(match, game)).join("") : `<p class="detail-message">No game details are available yet.</p>`;
+  if (!games.length) {
+    return `<div class="detail-message"><p>${escapeHtml(details.message || "Official game details are not available yet.")}</p><button class="detail-retry" type="button">Retry</button></div>`;
+  }
+  const gameMarkup = games.map((game) => gameDetailMarkup(match, game)).join("");
+  return games.some((game) => game.available === false)
+    ? `${gameMarkup}<button class="detail-retry" type="button">Retry unavailable games</button>`
+    : gameMarkup;
 }
 
 function gameDetailMarkup(match, game) {
   if (game.available === false) {
-    return `<section class="game-detail unavailable"><strong>Game ${escapeHtml(game.number ?? "—")}</strong><span>${escapeHtml(game.state || "Details unavailable")}</span></section>`;
+    return `<section class="game-detail unavailable"><strong>Game ${escapeHtml(game.number ?? "—")}</strong><span>${escapeHtml(game.message || game.state || "Details unavailable")}</span></section>`;
   }
   const patch = game.patch || "16.15.1";
   const teams = [game.teams?.blue, game.teams?.red].filter(Boolean);
@@ -284,11 +290,24 @@ function formatDifference(value) { return `${value > 0 ? "+" : ""}${Number(value
 function differenceClass(value) { return value > 0 ? "positive" : value < 0 ? "negative" : "even"; }
 function teamName(match, code) { return code === match.blueCode ? match.blue : code === match.redCode ? match.red : code; }
 
-async function loadMatchDetails(match) {
+function matchDetailsUrl(match, refresh = false) {
+  const params = new URLSearchParams({ matchId: String(match.matchId) });
+  if (Array.isArray(match.gameIds) && match.gameIds.length) {
+    params.set("gameIds", JSON.stringify(match.gameIds));
+  }
+  if (match.startTime) params.set("startTime", match.startTime);
+  if (match.teamIds && typeof match.teamIds === "object") {
+    params.set("teamIds", JSON.stringify(match.teamIds));
+  }
+  if (refresh) params.set("refresh", "1");
+  return `${API_BASE_URL}/api/match-details?${params}`;
+}
+
+async function loadMatchDetails(match, refresh = false) {
   if (!match.matchId || !String(match.matchId).trim()) return;
   state.detailLoading.add(match.id); renderMatches();
   try {
-    const response = await fetch(`${API_BASE_URL}/api/match-details?matchId=${encodeURIComponent(match.matchId)}`);
+    const response = await fetch(matchDetailsUrl(match, refresh));
     if (!response.ok) throw new Error(`Match details unavailable (${response.status})`);
     state.details.set(match.id, await response.json());
   } catch (error) {
@@ -454,9 +473,10 @@ $("#match-list").addEventListener("click", (event) => {
   if (!match) return;
   if (event.target.closest(".detail-retry")) {
     state.detailErrors.delete(match.id);
+    state.details.delete(match.id);
     state.expandedMatchId = match.id;
     renderMatches();
-    loadMatchDetails(match);
+    loadMatchDetails(match, true);
     return;
   }
   if (state.expandedMatchId === match.id) { state.expandedMatchId = null; renderMatches(); return; }

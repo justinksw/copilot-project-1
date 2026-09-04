@@ -125,6 +125,41 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(set(index["by_id"]), {"valid"})
         self.assertEqual(index["diagnostics"]["skipped"], 1)
 
+    def test_official_index_reads_nested_serialized_event_matches(self):
+        event = {
+            "__typename": "EventMatch",
+            "id": "event-42",
+            "startTime": "2026-08-30T04:00:00Z",
+            "league": {"name": "LCK"},
+            "match": {
+                "id": "42",
+                "teams": {
+                    "blue": {"team": {"id": "team:1", "code": "T1"}},
+                    "red": {"team": {"id": "team:2", "name": "Gen.G"}},
+                },
+                "games": {
+                    "one": {"game": {
+                        "gameId": "1001", "sequenceNumber": "1",
+                        "status": "completed",
+                        "gameStartTime": "2026-08-30T04:20:00Z",
+                    }},
+                },
+            },
+        }
+        payload = json.dumps({"props": {"serialized": json.dumps({"events": [event]})}})
+        with patch.object(server, "fetch_official_schedule", return_value=payload):
+            server.OFFICIAL_CACHE["expires"] = server.datetime.min.replace(
+                tzinfo=server.timezone.utc
+            )
+            index = server.load_official_index()
+        entry = index["by_id"]["42"]
+        self.assertEqual(entry["competition"], "LCK")
+        self.assertEqual(entry["teamIds"]["team:2"], "GEN")
+        self.assertEqual(entry["gameIds"], [{
+            "id": "1001", "number": 1, "state": "completed",
+            "startTime": "2026-08-30T04:20:00Z",
+        }])
+
     def test_parse_matches_links_official_game_ids(self):
         official = official_fragment("42")
         index = {
@@ -195,6 +230,24 @@ class ScheduleTests(unittest.TestCase):
             "43",
         )
 
+    def test_close_start_time_links_only_the_unique_nearest_match(self):
+        first = {
+            "matchId": "42", "startTime": "2026-08-30T04:05:00+00:00",
+            "teamIds": {"team:1": "T1", "team:2": "GEN"},
+        }
+        second = {
+            "matchId": "43", "startTime": "2026-08-30T07:00:00+00:00",
+            "teamIds": {"team:1": "T1", "team:2": "GEN"},
+        }
+        index = {
+            "by_key": {("2026-08-30", ("GEN", "T1")): [first, second]},
+            "by_date": {"2026-08-30": [first, second]},
+        }
+        self.assertEqual(
+            server.find_official_match(index, "2026-08-30", ("T1", "GEN"), "12:00")["matchId"],
+            "42",
+        )
+
     def test_duplicate_sources_merge_but_rematches_do_not(self):
         base = {
             "date": "2026-08-30", "time": "12:00", "league": "LCK",
@@ -248,9 +301,91 @@ class ScheduleTests(unittest.TestCase):
                 server.load_game_details("42"),
                 {
                     "matchId": "42",
-                    "games": [{"number": 1, "state": "COMPLETED", "available": False}],
+                    "games": [{
+                        "number": 1, "state": "COMPLETED", "available": False,
+                        "reason": "feed_unavailable",
+                        "message": "The official live-stats feed is unavailable.",
+                    }],
                 },
             )
+
+    def test_game_details_try_the_recorded_game_start_before_match_offsets(self):
+        official = {
+            "by_id": {
+                "42": {
+                    "startTime": "2026-08-30T04:00:00+00:00",
+                    "teamIds": {"team:1": "T1", "team:2": "GEN"},
+                    "gameIds": [{
+                        "id": "1001", "number": 2, "state": "completed",
+                        "startTime": "2026-08-30T05:15:00Z",
+                    }],
+                }
+            }
+        }
+        window = {
+            "gameMetadata": {
+                "blueTeamMetadata": {"esportsTeamId": "team:1", "participantMetadata": []},
+                "redTeamMetadata": {"esportsTeamId": "team:2", "participantMetadata": []},
+            },
+            "frames": [{"blueTeam": {}, "redTeam": {}}],
+        }
+        details = {"frames": [{"participants": [{}]}]}
+        requested_timestamps = []
+
+        def feed(path, starting_time=None):
+            requested_timestamps.append(starting_time)
+            return details if path.startswith("details/") else window
+
+        with patch.object(server, "load_official_index", return_value=official), \
+             patch.object(server, "fetch_feed", side_effect=feed):
+            result = server.load_game_details("42")
+        self.assertEqual(
+            requested_timestamps,
+            ["2026-08-30T05:15:00Z", "2026-08-30T05:15:00Z"],
+        )
+        self.assertEqual(result["games"][0]["number"], 2)
+
+    def test_game_details_use_validated_schedule_fallback(self):
+        fallback = server.detail_fallback_match("42", {
+            "gameIds": [json.dumps([{"id": "1001", "number": 1, "state": "completed"}])],
+            "startTime": ["2026-08-30T04:00:00Z"],
+            "teamIds": [json.dumps({"team:1": "T1", "team:2": "GEN"})],
+        })
+        self.assertEqual(fallback["gameIds"][0]["id"], "1001")
+        self.assertEqual(fallback["teamIds"]["team:2"], "GEN")
+        with patch.object(server, "load_official_index", return_value={"by_id": {}}), \
+             patch.object(server, "fetch_feed", return_value={"frames": []}):
+            result = server.load_game_details("42", fallback)
+        self.assertEqual(result["games"][0]["reason"], "feed_unavailable")
+
+    def test_game_details_use_fallback_games_missing_from_current_index(self):
+        fallback = {
+            "matchId": "42",
+            "startTime": "2026-08-30T04:00:00+00:00",
+            "teamIds": {"team:1": "T1", "team:2": "GEN"},
+            "gameIds": [{"id": "1001", "number": 1, "state": "completed"}],
+        }
+        current_index = {
+            "by_id": {
+                "42": {
+                    "matchId": "42",
+                    "startTime": "2026-08-30T04:00:00+00:00",
+                    "teamIds": {"team:1": "T1", "team:2": "GEN"},
+                    "gameIds": [],
+                }
+            }
+        }
+        requested_paths = []
+
+        def feed(path, starting_time=None):
+            requested_paths.append(path)
+            return {"frames": []}
+
+        with patch.object(server, "load_official_index", return_value=current_index), \
+             patch.object(server, "fetch_feed", side_effect=feed):
+            result = server.load_game_details("42", fallback)
+        self.assertIn("details/1001", requested_paths)
+        self.assertEqual(result["games"][0]["number"], 1)
 
     def test_game_details_normalize_mocked_feeds(self):
         official = {
