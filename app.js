@@ -22,7 +22,7 @@ const TEAM_LOGOS = Object.freeze({
 const state = {
   activeTab: "today", matches: [], expandedMatchId: null, details: new Map(),
   detailLoading: new Set(), detailErrors: new Map(), standings: [], standingsMeta: {},
-  ranges: [], loadingBatch: false, scheduleStale: false, weekOffset: 0
+  ranges: [], loadingRanges: new Set(), scheduleStale: false, weekOffset: 0
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -50,6 +50,10 @@ function calculateTabRange(tab, today, weekOffset = 0) {
 
 function tabRange(tab, today = dateKey(new Date())) {
   return calculateTabRange(tab, today, state.weekOffset);
+}
+
+function initialBatchRange(today) {
+  return { from: shiftDate(today, -1), to: shiftDate(today, 1) };
 }
 
 function tabLabel(tab) {
@@ -143,14 +147,20 @@ function mergeMatchRecord(existing, incoming) {
       merged[key] = value;
     }
   });
+  if (!validMatchScore(merged)) {
+    merged.blueScore = null;
+    merged.redScore = null;
+    if (merged.status === "completed") merged.status = "upcoming";
+  }
   return merged;
 }
 
 function renderPeriodRange(range) {
   $("#period-range").textContent = formatRange(range);
   const browsingWeek = state.activeTab !== "today";
-  $("#earlier-week").disabled = !browsingWeek || state.loadingBatch;
-  $("#later-week").disabled = !browsingWeek || state.loadingBatch;
+  const loading = isRangeLoading(range.from, range.to);
+  $("#earlier-week").disabled = !browsingWeek || loading;
+  $("#later-week").disabled = !browsingWeek || loading;
 }
 
 function renderTabs() {
@@ -213,7 +223,8 @@ function loadedScheduleRange() {
 
 function updateBatchStatus() {
   const loadedRange = loadedScheduleRange();
-  const status = state.loadingBatch
+  const range = tabRange(state.activeTab);
+  const status = isRangeLoading(range.from, range.to)
     ? "Loading schedule…"
     : state.scheduleStale
       ? "Showing cached schedule · refresh when online"
@@ -383,9 +394,33 @@ function rangeContainsInterval(from, to) {
   return cursor > to;
 }
 
-async function fetchBatch(from, to) {
-  if (state.loadingBatch || rangeContainsInterval(from, to)) return;
-  state.loadingBatch = true; updateBatchStatus();
+function uncoveredRanges(from, to, ranges = state.ranges) {
+  const gaps = [];
+  let cursor = from;
+  normalizeRanges(ranges).forEach((range) => {
+    if (range.to < cursor || range.from > to) return;
+    if (range.from > cursor) gaps.push({ from: cursor, to: shiftDate(range.from, -1) });
+    if (range.to >= cursor) cursor = shiftDate(range.to, 1);
+  });
+  if (cursor <= to) gaps.push({ from: cursor, to });
+  return gaps;
+}
+
+function batchKey(from, to) {
+  return `${from}:${to}`;
+}
+
+function isRangeLoading(from, to) {
+  return [...state.loadingRanges].some((key) => {
+    const [start, end] = key.split(":");
+    return start <= to && end >= from;
+  });
+}
+
+async function requestBatch(from, to) {
+  const key = batchKey(from, to);
+  if (state.loadingRanges.has(key)) return;
+  state.loadingRanges.add(key); updateBatchStatus();
   try {
     const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${encodeURIComponent(MATCH_TEAM)}`;
     const response = await fetch(url);
@@ -401,8 +436,12 @@ async function fetchBatch(from, to) {
   } catch (error) {
     console.warn(error); state.scheduleStale = true;
   } finally {
-    state.loadingBatch = false; renderMatches();
+    state.loadingRanges.delete(key); renderMatches();
   }
+}
+
+async function fetchBatch(from, to) {
+  await Promise.all(uncoveredRanges(from, to).map(({ from: start, to: end }) => requestBatch(start, end)));
 }
 
 async function loadStandings() {
@@ -419,9 +458,8 @@ async function loadStandings() {
 async function refreshMatches() {
   state.ranges = []; state.scheduleStale = false; state.weekOffset = 0;
   const today = dateKey(new Date());
-  const previous = calculateTabRange("previous", today);
-  const next = calculateTabRange("next", today);
-  await fetchBatch(previous.from, next.to);
+  const initial = initialBatchRange(today);
+  await fetchBatch(initial.from, initial.to);
   loadStandings();
 }
 
