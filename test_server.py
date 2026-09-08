@@ -192,6 +192,46 @@ class ScheduleTests(unittest.TestCase):
         )
         self.assertTrue(server.is_unresolved_opponent("Winner of semifinal 1"))
 
+    def test_unresolved_opponent_is_reconciled_with_unique_official_event(self):
+        official = official_fragment("sep-6")
+        official["startTime"] = "2026-09-06T04:00:00Z"
+        official["teams"][1]["name"] = "Gen.G"
+        index = {
+            "by_date": {
+                "2026-09-06": [server.normalize_official_event(official)],
+            },
+        }
+        row = leaguepedia_row("T1", "TBD", 8, 0).replace(
+            "2026-08-30", "2026-09-06"
+        ).replace(
+            "30 August 2026", "6 September 2026"
+        )
+        parsed = server.parse_matches("T1", "T1/Match_History", row, index)[0]
+        self.assertEqual(
+            (parsed["red"], parsed["redCode"], parsed["matchId"]),
+            ("Gen.G", "GEN", "sep-6"),
+        )
+        self.assertEqual(parsed["gameIds"][0]["id"], "1001")
+        self.assertEqual(
+            (parsed["blueScore"], parsed["redScore"], parsed["status"]),
+            (None, None, "upcoming"),
+        )
+
+    def test_unresolved_opponent_stays_unlinked_when_official_event_is_ambiguous(self):
+        first = server.normalize_official_event(official_fragment("sep-6-gen"))
+        second_event = official_fragment("sep-6-hle", "T1", "HLE")
+        second = server.normalize_official_event(second_event)
+        for event in (first, second):
+            event["startTime"] = "2026-09-06T04:00:00+00:00"
+        index = {"by_date": {"2026-09-06": [first, second]}}
+        row = leaguepedia_row("T1", "TBD").replace(
+            "2026-08-30", "2026-09-06"
+        ).replace(
+            "30 August 2026", "6 September 2026"
+        )
+        parsed = server.parse_matches("T1", "T1/Match_History", row, index)[0]
+        self.assertEqual((parsed["red"], parsed.get("matchId")), ("TBD", None))
+
     def test_ambiguous_same_day_pair_is_not_linked(self):
         first = official_fragment("42")
         second = official_fragment("43")
@@ -283,6 +323,45 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(
             (merged[0]["blueScore"], merged[0]["redScore"], merged[0]["status"]),
             (2, 3, "completed"),
+        )
+
+    def test_merge_rejects_invalid_completed_placeholder_result(self):
+        stale = {
+            "date": "2026-09-06", "time": "12:00", "blue": "T1", "red": "TBD",
+            "blueCode": "T1", "redCode": "TBD", "blueScore": 8, "redScore": 0,
+            "series": "BO3", "status": "completed",
+        }
+        merged = server.merge_match_records([stale])
+        self.assertEqual(
+            (merged[0]["blueScore"], merged[0]["redScore"], merged[0]["status"]),
+            (None, None, "upcoming"),
+        )
+
+    def test_fast_schedule_cache_loads_only_t1_history(self):
+        server.SCHEDULE_CACHE["expires"] = server.datetime.min.replace(
+            tzinfo=server.timezone.utc
+        )
+        with patch.object(server, "load_official_index", return_value={"by_date": {}}), \
+             patch.object(
+                 server, "fetch_page",
+                 return_value=leaguepedia_row("T1", "Gen.G", 2, 1),
+             ) as fetch_page:
+            first = server.load_schedule_matches()
+            second = server.load_schedule_matches()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, first)
+        fetch_page.assert_called_once_with("T1/Match_History")
+
+    def test_fast_schedule_failure_is_not_cached(self):
+        server.SCHEDULE_CACHE["expires"] = server.datetime.min.replace(
+            tzinfo=server.timezone.utc
+        )
+        with patch.object(server, "load_official_index", return_value={"by_date": {}}), \
+             patch.object(server, "fetch_page", side_effect=OSError("offline")):
+            self.assertEqual(server.load_schedule_matches(), [])
+        self.assertLessEqual(
+            server.SCHEDULE_CACHE["expires"],
+            server.datetime.now(server.timezone.utc),
         )
 
     def test_game_details_return_unavailable_games_for_bad_feeds(self):

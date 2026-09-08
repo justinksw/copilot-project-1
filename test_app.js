@@ -67,6 +67,10 @@ assert.strictEqual(JSON.stringify(context.calculateTabRange("next", "2026-09-03"
   from: "2026-09-11",
   to: "2026-09-20"
 }));
+assert.strictEqual(JSON.stringify(context.initialBatchRange("2026-09-03")), JSON.stringify({
+  from: "2026-09-02",
+  to: "2026-09-04"
+}));
 assert.strictEqual(context.mergeMatches([
   match,
   { ...match, id: "different-stale-id", matchId: undefined }
@@ -99,6 +103,10 @@ assert.strictEqual(context.mergeMatches([
   match,
   { ...match, id: "history-copy", matchId: undefined, competition: "T1" }
 ]).length, 1);
+assert.strictEqual(context.mergeMatches([
+  { ...match, blue: "T1", red: "TBD", blueScore: 8, redScore: 0, status: "completed" },
+  { ...match, id: "schedule-copy", blue: "T1", red: "TBD", blueScore: null, redScore: null, status: "upcoming" }
+])[0].status, "upcoming");
 assert.strictEqual(JSON.stringify(context.normalizeRanges([
   { from: "2026-08-01", to: "2026-08-03" },
   { from: "2026-08-04", to: "2026-08-07" },
@@ -106,6 +114,12 @@ assert.strictEqual(JSON.stringify(context.normalizeRanges([
 ])), JSON.stringify([
   { from: "2026-08-01", to: "2026-08-07" },
   { from: "2026-08-10", to: "2026-08-12" }
+]));
+assert.strictEqual(JSON.stringify(context.uncoveredRanges("2026-08-01", "2026-08-12", [
+  { from: "2026-08-01", to: "2026-08-07" },
+  { from: "2026-08-10", to: "2026-08-12" }
+])), JSON.stringify([
+  { from: "2026-08-08", to: "2026-08-09" }
 ]));
 
 console.log("frontend schedule regression tests passed");

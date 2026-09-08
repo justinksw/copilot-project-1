@@ -19,6 +19,10 @@ CACHE = {
     "matches": [],
     "stage": {"page": "", "label": "", "year": "", "key": "", "refreshedAt": ""},
 }
+SCHEDULE_CACHE = {
+    "expires": datetime.min.replace(tzinfo=timezone.utc),
+    "matches": [],
+}
 OFFICIAL_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "by_key": {},
@@ -99,7 +103,7 @@ def valid_series_score(scores, teams=None, series=None):
         return False
     if any(not isinstance(score, int) or score < 0 or score > 3 for score in scores):
         return False
-    target = 3 if str(series or "").upper() == "BO5" else 2
+    target = 3 if str(series or "").upper() == "BO5" or max(scores) == 3 else 2
     return max(scores) == target and min(scores) < target
 
 
@@ -272,6 +276,21 @@ def record_quality(match):
     )
 
 
+def sanitize_match_record(match):
+    merged = dict(match)
+    scores = sanitize_series_score(
+        [merged.get("blueScore"), merged.get("redScore")],
+        [merged.get("blue"), merged.get("red")],
+        merged.get("series"),
+    )
+    merged["blueScore"], merged["redScore"] = scores
+    if valid_series_score(scores, [merged.get("blue"), merged.get("red")], merged.get("series")):
+        merged["status"] = "completed"
+    elif merged.get("status") == "completed":
+        merged["status"] = "upcoming"
+    return merged
+
+
 def merge_match_record(existing, incoming):
     preferred, fallback = (
         (incoming, existing)
@@ -284,14 +303,9 @@ def merge_match_record(existing, incoming):
             continue
         if merged.get(key) in (None, "", "—", []):
             merged[key] = value
-    if (
-        merged.get("blueScore") is not None
-        and merged.get("redScore") is not None
-    ):
-        merged["status"] = "completed"
     if preferred.get("matchId") and not merged.get("matchId"):
         merged["matchId"] = preferred["matchId"]
-    return merged
+    return sanitize_match_record(merged)
 
 
 def merge_match_records(records):
@@ -300,6 +314,7 @@ def merge_match_records(records):
     for record in records:
         if not record:
             continue
+        record = sanitize_match_record(record)
         existing_index = next(
             (indexes[key] for key in match_identity_keys(record) if key in indexes),
             None,
@@ -441,6 +456,7 @@ def normalize_official_event(event):
     start = parse_start(str(start_value).replace("Z", "+0000"))
     raw_teams = first_value(sources, "teams", "matchTeams") or []
     team_entries = {}
+    team_names = {}
     for raw_team in object_entries(raw_teams):
         team = nested_object(raw_team, "team")
         if not isinstance(team, dict):
@@ -448,14 +464,20 @@ def normalize_official_event(event):
         team_sources = [team, raw_team] if team is not raw_team else [team]
         team_id = first_value(team_sources, "id", "teamId", "esportsTeamId")
         code = first_value(team_sources, "code", "shortCode", "name", "displayName")
+        name = first_value(team_sources, "name", "displayName", "code", "shortCode")
         if team_id and code and not is_unresolved_opponent(code):
             team_entries[str(team_id)] = team_code(code)
+            team_names[str(team_id)] = str(name or code)
     if len(set(team_entries.values())) != 2:
         return None
     team_ids = {}
+    normalized_team_names = {}
     for team_id, code in team_entries.items():
         team_ids[team_id] = code
         team_ids[team_id.rsplit(":", 1)[-1]] = code
+        name = team_names.get(team_id, code)
+        normalized_team_names[team_id] = name
+        normalized_team_names[team_id.rsplit(":", 1)[-1]] = name
     raw_games = first_value(sources, "games", "gameIds") or []
     games = []
     game_ids = set()
@@ -487,6 +509,7 @@ def normalize_official_event(event):
         "startTime": start.isoformat(),
         "gameIds": games,
         "teamIds": team_ids,
+        "teamNames": normalized_team_names,
     }
     competition = (
         first_value(sources, "tournamentName", "leagueName", "eventName")
@@ -620,6 +643,36 @@ def find_official_match(official_index, date, codes, match_time=None):
     return None
 
 
+def find_official_match_for_known_team(official_index, date, known_code, match_time=None):
+    index = official_index or {}
+    normalized_code = team_code(known_code)
+    if is_unresolved_opponent(normalized_code):
+        return None
+    candidates = [
+        entry for entry in index.get("by_date", {}).get(date, [])
+        if normalized_code in set(entry.get("teamIds", {}).values())
+        and len(set(entry.get("teamIds", {}).values())) == 2
+    ]
+    timed = nearest_official_match(candidates, match_time)
+    if timed:
+        return timed
+    candidate_ids = {entry.get("matchId") for entry in candidates if entry.get("matchId")}
+    return candidates[0] if len(candidate_ids) == 1 else None
+
+
+def official_opponent(official, known_code):
+    codes = set(official.get("teamIds", {}).values())
+    opponents = codes - {team_code(known_code)}
+    return next(iter(opponents)) if len(opponents) == 1 else None
+
+
+def official_team_name(official, code):
+    for team_id, team_code_value in official.get("teamIds", {}).items():
+        if team_code_value == code:
+            return official.get("teamNames", {}).get(team_id, code)
+    return code
+
+
 def nearest_official_match(entries, match_time):
     if not isinstance(match_time, str) or not re.fullmatch(r"\d{2}:\d{2}", match_time):
         return None
@@ -715,12 +768,31 @@ def parse_matches(league, page, html, official_index=None):
             }
         source_competition = match["competition"]
         match["id"] = "local:" + "|".join(map(str, match_fallback_identity(match)[1:]))
-        official = find_official_match(
-            official_index,
-            date,
-            (match["blueCode"], match["redCode"]),
-            time,
-        )
+        unresolved_sides = [
+            side for side in ("blue", "red")
+            if is_unresolved_opponent(match[side])
+        ]
+        if len(unresolved_sides) == 1:
+            known_side = "red" if unresolved_sides[0] == "blue" else "blue"
+            official = find_official_match_for_known_team(
+                official_index, date, match[f"{known_side}Code"], time
+            )
+            if official:
+                opponent_code = official_opponent(official, match[f"{known_side}Code"])
+                if not opponent_code:
+                    official = None
+                else:
+                    unresolved_side = unresolved_sides[0]
+                    match[unresolved_side] = official_team_name(official, opponent_code)
+                    match[f"{unresolved_side}Code"] = opponent_code
+                    match[f"{unresolved_side}Logo"] = None
+        else:
+            official = find_official_match(
+                official_index,
+                date,
+                (match["blueCode"], match["redCode"]),
+                time,
+            )
         if official:
             match["matchId"] = official["matchId"]
             match["startTime"] = official["startTime"]
@@ -1130,6 +1202,25 @@ def load_matches():
     return matches
 
 
+def load_schedule_matches():
+    now = datetime.now(timezone.utc)
+    if SCHEDULE_CACHE["expires"] > now:
+        return SCHEDULE_CACHE["matches"]
+    page = TEAM_MATCH_HISTORY_PAGES["T1"]
+    try:
+        matches = merge_match_records(parse_matches(
+            "T1", page, fetch_page(page), load_official_index()
+        ))
+    except Exception as error:
+        print(f"[Leaguepedia] {page}: {error}")
+        return []
+    SCHEDULE_CACHE.update({
+        "expires": now + timedelta(minutes=10),
+        "matches": matches,
+    })
+    return matches
+
+
 def normalize_date(value):
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
@@ -1326,10 +1417,14 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path.path != "/api/matches":
             return super().do_GET()
-        matches = load_matches()
         query = parse_qs(path.query)
         start, end = requested_range(query)
         team = query.get("team", [None])[0]
+        matches = (
+            load_schedule_matches()
+            if team_code(team) == "T1"
+            else load_matches()
+        )
         result = [
             match for match in matches
             if start <= (normalize_date(match.get("date")) or start) <= end and team_matches(match, team)
