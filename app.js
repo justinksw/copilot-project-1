@@ -202,7 +202,7 @@ function renderMatches() {
 function teamMarkup(name, code, logo, score, dimScore) {
   const logoSource = TEAM_LOGOS[code] || (logo ? `${API_BASE_URL}/api/logo?url=${encodeURIComponent(logo)}` : null);
   const logoMarkup = logoSource
-    ? `<img class="team-logo" src="${escapeHtml(logoSource)}" alt="${escapeHtml(name)} logo" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.classList.add('is-visible')" /><span class="team-logo logo-fallback">${escapeHtml(code)}</span>`
+    ? `<img class="team-logo" src="${escapeHtml(logoSource)}" alt="${escapeHtml(name)} logo" width="128" height="100" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.classList.add('is-visible')" /><span class="team-logo logo-fallback">${escapeHtml(code)}</span>`
     : `<span class="team-logo">${escapeHtml(code)}</span>`;
   return `${logoMarkup}<strong class="team-name">${escapeHtml(name)}</strong><span class="team-score ${dimScore ? "dim" : ""}">${escapeHtml(score ?? "—")}</span>`;
 }
@@ -459,8 +459,10 @@ async function refreshMatches() {
   state.ranges = []; state.scheduleStale = false; state.weekOffset = 0;
   const today = dateKey(new Date());
   const initial = initialBatchRange(today);
-  await fetchBatch(initial.from, initial.to);
-  loadStandings();
+  await Promise.all([
+    fetchBatch(initial.from, initial.to),
+    loadStandings()
+  ]);
 }
 
 $("#match-tabs").addEventListener("click", (event) => {
