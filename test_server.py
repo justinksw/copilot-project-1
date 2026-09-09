@@ -1,5 +1,7 @@
 import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import patch
 
 import server
@@ -82,6 +84,33 @@ class ScheduleTests(unittest.TestCase):
             server.find_official_match(index, "2026-08-30", ("GEN", "T1"))["matchId"],
             "42",
         )
+
+    def test_concurrent_official_index_loads_share_one_upstream_request(self):
+        fragment = json.dumps(official_fragment("42"))
+        started = Event()
+        release = Event()
+        calls = []
+
+        def slow_schedule():
+            calls.append(True)
+            started.set()
+            release.wait(timeout=1)
+            return fragment
+
+        server.OFFICIAL_CACHE["expires"] = server.datetime.min.replace(
+            tzinfo=server.timezone.utc
+        )
+        with patch.object(server, "fetch_official_schedule", side_effect=slow_schedule):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(server.load_official_index)
+                    for _ in range(2)
+                ]
+                self.assertTrue(started.wait(timeout=1))
+                release.set()
+                indexes = [future.result() for future in futures]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(indexes[0]["by_id"], indexes[1]["by_id"])
 
     def test_official_index_links_multiple_matches_with_aliases(self):
         first = official_fragment("event-gen")
