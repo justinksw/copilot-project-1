@@ -11,6 +11,10 @@ const context = {
   Set,
   URL,
   URLSearchParams,
+  AbortController,
+  setTimeout,
+  clearTimeout,
+  fetch: async () => { throw new Error("fetch should be mocked in timeout tests"); },
   window: { NEXUS_API_BASE_URL: "", location: { hostname: "localhost" } },
   document: { querySelector: () => null }
 };
@@ -122,4 +126,41 @@ assert.strictEqual(JSON.stringify(context.uncoveredRanges("2026-08-01", "2026-08
   { from: "2026-08-08", to: "2026-08-09" }
 ]));
 
-console.log("frontend schedule regression tests passed");
+assert.strictEqual(context.FETCH_TIMEOUT_MS, 18000);
+assert.strictEqual(typeof context.fetchWithTimeout, "function");
+assert.strictEqual(typeof context.fetchJson, "function");
+assert.match(source, /AbortController/);
+assert.match(source, /Refreshing schedule…/);
+assert.match(source, /scheduleError/);
+
+(async () => {
+  let aborted = false;
+  const originalFetch = context.fetch;
+  context.fetch = (url, options = {}) => new Promise((resolve, reject) => {
+    if (options.signal) {
+      if (options.signal.aborted) {
+        aborted = true;
+        const error = new Error("The operation was aborted");
+        error.name = "AbortError";
+        reject(error);
+        return;
+      }
+      options.signal.addEventListener("abort", () => {
+        aborted = true;
+        const error = new Error("The operation was aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    }
+  });
+  await assert.rejects(
+    () => context.fetchWithTimeout("https://example.test/slow", {}, 25),
+    (error) => error && error.name === "AbortError"
+  );
+  assert.strictEqual(aborted, true);
+  context.fetch = originalFetch;
+  console.log("frontend schedule regression tests passed");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
