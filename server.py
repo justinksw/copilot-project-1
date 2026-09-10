@@ -1,1 +1,1 @@
-@/tmp/full_args_for_mcp.json
+WILL_BE_REPLACED
