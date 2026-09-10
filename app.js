@@ -481,6 +481,7 @@ async function loadStandings() {
     state.standingsError = payload.error || null;
   } catch (error) {
     console.warn(error);
+    state.standings = [];
     state.standingsError = error?.name === "AbortError"
       ? "Standings request timed out."
       : error?.message || "Standings are currently unavailable.";
