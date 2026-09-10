@@ -1,1 +1,1 @@
-PLACEHOLDER_REPLACE_FROM_FILE
+@/tmp/full_args_for_mcp.json
