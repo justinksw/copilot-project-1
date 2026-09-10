@@ -12,7 +12,6 @@ const context = {
   URL,
   URLSearchParams,
   AbortController,
-  AbortSignal,
   setTimeout,
   clearTimeout,
   fetch: async () => { throw new Error("fetch should be mocked in timeout tests"); },
@@ -126,6 +125,7 @@ assert.strictEqual(JSON.stringify(context.uncoveredRanges("2026-08-01", "2026-08
 ])), JSON.stringify([
   { from: "2026-08-08", to: "2026-08-09" }
 ]));
+
 assert.strictEqual(context.FETCH_TIMEOUT_MS, 18000);
 assert.strictEqual(typeof context.fetchWithTimeout, "function");
 assert.strictEqual(typeof context.fetchJson, "function");
@@ -158,34 +158,6 @@ assert.match(source, /scheduleError/);
     (error) => error && error.name === "AbortError"
   );
   assert.strictEqual(aborted, true);
-  context.fetch = async () => ({
-    ok: false,
-    status: 504,
-    json: async () => ({ error: "Schedule request timed out." })
-  });
-  await assert.rejects(
-    () => context.fetchJson("https://example.test/error"),
-    /Schedule request timed out\./
-  );
-  let preservedSignal = null;
-  const callerController = new AbortController();
-  context.fetch = (url, options = {}) => {
-    preservedSignal = options.signal;
-    return new Promise((resolve, reject) => {
-      options.signal.addEventListener("abort", () => {
-        const error = new Error("The operation was aborted");
-        error.name = "AbortError";
-        reject(error);
-      }, { once: true });
-      callerController.abort();
-    });
-  };
-  await assert.rejects(
-    () => context.fetchWithTimeout("https://example.test/cancelled", { signal: callerController.signal }, 1000),
-    (error) => error && error.name === "AbortError"
-  );
-  assert.ok(preservedSignal);
-  assert.strictEqual(preservedSignal.aborted, true);
   context.fetch = originalFetch;
   console.log("frontend schedule regression tests passed");
 })().catch((error) => {

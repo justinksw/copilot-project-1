@@ -21,36 +21,17 @@ const TEAM_LOGOS = Object.freeze({
 });
 var FETCH_TIMEOUT_MS = 18000;
 
-function mergedAbortSignal(signals) {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  signals.filter(Boolean).forEach((signal) => {
-    if (signal.aborted) abort();
-    else signal.addEventListener("abort", abort, { once: true });
-  });
-  return controller.signal;
-}
-
 function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
-  const timeoutController = new AbortController();
-  const signals = [options.signal, timeoutController.signal].filter(Boolean);
-  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function"
-    ? AbortSignal.any(signals)
-    : mergedAbortSignal(signals);
-  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
-  const merged = { ...options, signal };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const merged = { ...options, signal: controller.signal };
   return fetch(url, merged).finally(() => clearTimeout(timer));
 }
 
 async function fetchJson(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const response = await fetchWithTimeout(url, options, timeoutMs);
-  const payload = await response.json();
-  if (!response.ok) {
-    const error = new Error(payload?.error || `Request failed (${response.status})`);
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
+  if (!response.ok) throw new Error(`Request failed (${response.status})`);
+  return response.json();
 }
 
 const state = {
@@ -259,30 +240,35 @@ function loadedScheduleRange() {
 function updateBatchStatus() {
   const loadedRange = loadedScheduleRange();
   const range = tabRange(state.activeTab);
-  const hasMatches = state.matches.length > 0;
-  const status = isRangeLoading(range.from, range.to)
-    ? hasMatches ? "Refreshing schedule…" : "Loading schedule…"
-    : state.scheduleError
-      ? state.scheduleStale
-        ? `Showing cached schedule · ${state.scheduleError}`
-        : state.scheduleError
-      : state.scheduleStale
-        ? "Showing cached schedule · refresh when online"
-        : loadedRange
-          ? "Schedule ready"
-          : "No schedule loaded";
+  const loading = isRangeLoading(range.from, range.to);
+  let status;
+  if (loading) {
+    status = state.matches.length
+      ? "Refreshing schedule…"
+      : "Loading schedule…";
+  } else if (state.scheduleError) {
+    status = state.matches.length
+      ? `Schedule refresh failed · showing cached data · ${state.scheduleError}`
+      : `Schedule unavailable · ${state.scheduleError}`;
+  } else if (state.scheduleStale) {
+    status = "Showing cached schedule · refresh when online";
+  } else if (loadedRange) {
+    status = "Schedule ready";
+  } else {
+    status = "No schedule loaded";
+  }
   $("#updated").textContent = status;
 }
 
 function renderStandings() {
   const competition = state.standingsMeta.label || state.standingsMeta.league || "Current competition";
   $("#standings-heading").textContent = `${competition} leaderboard`;
-  const standingsContext = state.standingsMeta.stage
+  $("#standings-context").textContent = state.standingsMeta.stage
     ? `${state.standingsMeta.stage} · Series · Games`
     : "Series · Games";
-  $("#standings-context").textContent = state.standingsError
-    ? `${standingsContext} · ${state.standingsError}`
-    : standingsContext;
+  const emptyMessage = state.standingsError
+    ? `Standings unavailable · ${state.standingsError}`
+    : "Standings are currently unavailable.";
   $("#standings-list").innerHTML = state.standings.length
     ? state.standings.map((row) => `<li class="standing-row ${row.isFavorite ? "is-favorite" : ""}" ${row.isFavorite ? 'aria-current="true"' : ""}>
       <span class="standing-rank">${escapeHtml(row.rank)}</span>
@@ -290,7 +276,7 @@ function renderStandings() {
       <span class="standing-record">${escapeHtml(row.matchRecord)}<small>series</small></span>
       <span class="standing-record">${escapeHtml(row.gameRecord)}<small>games</small></span>
     </li>`).join("")
-    : `<li class="detail-message">${escapeHtml(state.standingsError || "Standings are currently unavailable.")}</li>`;
+    : `<li class="detail-message">${escapeHtml(emptyMessage)}</li>`;
 }
 
 function renderMatchDetails(match) {
@@ -361,9 +347,18 @@ async function loadMatchDetails(match, refresh = false) {
   if (!match.matchId || !String(match.matchId).trim()) return;
   state.detailLoading.add(match.id); renderMatches();
   try {
-    state.details.set(match.id, await fetchJson(matchDetailsUrl(match, refresh)));
+    const payload = await fetchJson(matchDetailsUrl(match, refresh));
+    state.details.set(match.id, payload);
+    state.detailErrors.delete(match.id);
   } catch (error) {
-    console.warn(error); state.detailErrors.set(match.id, "Match details are currently unavailable.");
+    console.warn(error);
+    const timedOut = error && (error.name === "AbortError" || /aborted/i.test(String(error.message || "")));
+    state.detailErrors.set(
+      match.id,
+      timedOut
+        ? "Match details timed out. Tap retry to try again."
+        : "Match details are currently unavailable."
+    );
   } finally {
     state.detailLoading.delete(match.id);
     if (state.expandedMatchId === match.id) renderMatches();
@@ -458,31 +453,35 @@ function isRangeLoading(from, to) {
   });
 }
 
+function describeFetchError(error, fallback) {
+  if (!error) return fallback;
+  if (error.name === "AbortError" || /aborted/i.test(String(error.message || ""))) {
+    return "request timed out";
+  }
+  return error.message || fallback;
+}
+
 async function requestBatch(from, to) {
   const key = batchKey(from, to);
   if (state.loadingRanges.has(key)) return;
-  state.loadingRanges.add(key);
-  state.scheduleError = null;
-  updateBatchStatus();
+  state.loadingRanges.add(key); updateBatchStatus();
   try {
-   const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${encodeURIComponent(MATCH_TEAM)}`;
-   const payload = await fetchJson(url);
+    const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${encodeURIComponent(MATCH_TEAM)}`;
+    const payload = await fetchJson(url);
     state.matches = mergeMatches([
       ...state.matches.filter((match) => match.date < from || match.date > to),
       ...(payload.matches || [])
     ]);
     state.ranges = normalizeRanges([...state.ranges, { from, to }]).slice(-12);
-   state.scheduleStale = Boolean(payload.stale);
-   state.scheduleError = payload.error || (payload.stale ? "Schedule refresh failed." : null);
-   saveBatches();
+    state.scheduleStale = Boolean(payload.stale);
+    state.scheduleError = null;
+    saveBatches();
   } catch (error) {
-   console.warn(error);
-   state.scheduleStale = rangeContainsInterval(from, to);
-   state.scheduleError = error?.name === "AbortError"
-     ? "Schedule request timed out."
-     : error?.message || "Schedule is currently unavailable.";
+    console.warn(error);
+    state.scheduleStale = state.matches.length > 0;
+    state.scheduleError = describeFetchError(error, "schedule request failed");
   } finally {
-   state.loadingRanges.delete(key); renderMatches();
+    state.loadingRanges.delete(key); renderMatches();
   }
 }
 
@@ -495,18 +494,20 @@ async function loadStandings() {
     const payload = await fetchJson(`${API_BASE_URL}/api/standings`);
     state.standings = payload.standings || [];
     state.standingsMeta = payload.competition || { league: payload.league, season: payload.season };
-    state.standingsError = payload.error || null;
+    state.standingsError = null;
   } catch (error) {
     console.warn(error);
-    state.standingsError = error?.name === "AbortError"
-      ? "Standings request timed out."
-      : error?.message || "Standings are currently unavailable.";
+    state.standingsError = describeFetchError(error, "standings request failed");
   }
   renderStandings();
 }
 
 async function refreshMatches() {
-  state.ranges = []; state.scheduleStale = false; state.weekOffset = 0;
+  state.ranges = [];
+  state.scheduleStale = false;
+  state.scheduleError = null;
+  state.standingsError = null;
+  state.weekOffset = 0;
   const today = dateKey(new Date());
   const initial = initialBatchRange(today);
   await Promise.all([
