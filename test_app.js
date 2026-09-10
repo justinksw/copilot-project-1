@@ -158,6 +158,15 @@ assert.match(source, /scheduleError/);
     (error) => error && error.name === "AbortError"
   );
   assert.strictEqual(aborted, true);
+  context.fetch = async () => ({
+    ok: false,
+    status: 504,
+    json: async () => ({ error: "Schedule request timed out." })
+  });
+  await assert.rejects(
+    () => context.fetchJson("https://example.test/error"),
+    /Schedule request timed out\./
+  );
   let preservedSignal = null;
   const callerController = new AbortController();
   context.fetch = (url, options = {}) => {

@@ -459,6 +459,13 @@ class ScheduleTests(unittest.TestCase):
         self.assertTrue(server.SCHEDULE_CACHE["stale"])
         self.assertIn("offline", server.SCHEDULE_CACHE["error"])
 
+    def test_fast_schedule_failure_without_stale_returns_empty_list(self):
+        with patch.object(server, "load_official_index", return_value={"by_date": {}}), \
+             patch.object(server, "fetch_page", side_effect=OSError("offline")):
+            self.assertEqual(server.load_schedule_matches(), [])
+        self.assertFalse(server.SCHEDULE_CACHE["stale"])
+        self.assertIn("offline", server.SCHEDULE_CACHE["error"])
+
     def test_load_standings_prefers_cached_matches_even_if_expired(self):
         server.CACHE["matches"] = [{
             "date": "2026-08-30",

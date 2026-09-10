@@ -263,7 +263,7 @@ function updateBatchStatus() {
   const status = isRangeLoading(range.from, range.to)
     ? hasMatches ? "Refreshing schedule…" : "Loading schedule…"
     : state.scheduleError
-      ? state.scheduleStale || hasMatches
+      ? state.scheduleStale
         ? `Showing cached schedule · ${state.scheduleError}`
         : state.scheduleError
       : state.scheduleStale
@@ -277,9 +277,12 @@ function updateBatchStatus() {
 function renderStandings() {
   const competition = state.standingsMeta.label || state.standingsMeta.league || "Current competition";
   $("#standings-heading").textContent = `${competition} leaderboard`;
-  $("#standings-context").textContent = state.standingsMeta.stage
+  const standingsContext = state.standingsMeta.stage
     ? `${state.standingsMeta.stage} · Series · Games`
     : "Series · Games";
+  $("#standings-context").textContent = state.standingsError
+    ? `${standingsContext} · ${state.standingsError}`
+    : standingsContext;
   $("#standings-list").innerHTML = state.standings.length
     ? state.standings.map((row) => `<li class="standing-row ${row.isFavorite ? "is-favorite" : ""}" ${row.isFavorite ? 'aria-current="true"' : ""}>
       <span class="standing-rank">${escapeHtml(row.rank)}</span>
@@ -474,7 +477,7 @@ async function requestBatch(from, to) {
    saveBatches();
   } catch (error) {
    console.warn(error);
-   state.scheduleStale = true;
+   state.scheduleStale = rangeContainsInterval(from, to);
    state.scheduleError = error?.name === "AbortError"
      ? "Schedule request timed out."
      : error?.message || "Schedule is currently unavailable.";

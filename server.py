@@ -1297,7 +1297,9 @@ def load_schedule_matches():
                 SCHEDULE_CACHE["stale"] = True
                 SCHEDULE_CACHE["error"] = str(error)
                 return stale_matches
-            raise
+            SCHEDULE_CACHE["stale"] = False
+            SCHEDULE_CACHE["error"] = str(error)
+            return []
         SCHEDULE_CACHE.update({
             "expires": now + timedelta(minutes=10),
             "matches": matches,
