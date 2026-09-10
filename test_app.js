@@ -12,6 +12,7 @@ const context = {
   URL,
   URLSearchParams,
   AbortController,
+  AbortSignal,
   setTimeout,
   clearTimeout,
   fetch: async () => { throw new Error("fetch should be mocked in timeout tests"); },
@@ -157,6 +158,25 @@ assert.match(source, /scheduleError/);
     (error) => error && error.name === "AbortError"
   );
   assert.strictEqual(aborted, true);
+  let preservedSignal = null;
+  const callerController = new AbortController();
+  context.fetch = (url, options = {}) => {
+    preservedSignal = options.signal;
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        const error = new Error("The operation was aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+      callerController.abort();
+    });
+  };
+  await assert.rejects(
+    () => context.fetchWithTimeout("https://example.test/cancelled", { signal: callerController.signal }, 1000),
+    (error) => error && error.name === "AbortError"
+  );
+  assert.ok(preservedSignal);
+  assert.strictEqual(preservedSignal.aborted, true);
   context.fetch = originalFetch;
   console.log("frontend schedule regression tests passed");
 })().catch((error) => {

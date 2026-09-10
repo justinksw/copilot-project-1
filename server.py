@@ -81,6 +81,7 @@ STAGE_CACHE_LOCK = Lock()
 CACHE_LOCK = Lock()
 SCHEDULE_CACHE_LOCK = Lock()
 STANDINGS_CACHE_LOCK = Lock()
+REQUEST_TIMEOUT_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 
 def team_code(name):
@@ -200,8 +201,7 @@ def fetch_official_schedule():
 
 
 def run_with_timeout(function, *args, timeout_seconds=API_LOAD_TIMEOUT_SECONDS, **kwargs):
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(function, *args, **kwargs)
+    future = REQUEST_TIMEOUT_EXECUTOR.submit(function, *args, **kwargs)
     try:
         return future.result(timeout=timeout_seconds)
     except TimeoutError as error:
@@ -209,8 +209,6 @@ def run_with_timeout(function, *args, timeout_seconds=API_LOAD_TIMEOUT_SECONDS, 
         raise TimeoutError(
             f"{function.__name__} timed out after {timeout_seconds} seconds"
         ) from error
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def season_page(year):

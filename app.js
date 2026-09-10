@@ -21,10 +21,24 @@ const TEAM_LOGOS = Object.freeze({
 });
 var FETCH_TIMEOUT_MS = 18000;
 
-function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+function mergedAbortSignal(signals) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const merged = { ...options, signal: controller.signal };
+  const abort = () => controller.abort();
+  signals.filter(Boolean).forEach((signal) => {
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+  return controller.signal;
+}
+
+function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const timeoutController = new AbortController();
+  const signals = [options.signal, timeoutController.signal].filter(Boolean);
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function"
+    ? AbortSignal.any(signals)
+    : mergedAbortSignal(signals);
+  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+  const merged = { ...options, signal };
   return fetch(url, merged).finally(() => clearTimeout(timer));
 }
 
@@ -481,7 +495,6 @@ async function loadStandings() {
     state.standingsError = payload.error || null;
   } catch (error) {
     console.warn(error);
-    state.standings = [];
     state.standingsError = error?.name === "AbortError"
       ? "Standings request timed out."
       : error?.message || "Standings are currently unavailable.";
