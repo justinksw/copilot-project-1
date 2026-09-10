@@ -19,10 +19,31 @@ const TEAM_LOGOS = Object.freeze({
   KRX: "assets/team-logos/KRX.png", KT: "assets/team-logos/KT.png", NS: "assets/team-logos/NS.png",
   T1: "assets/team-logos/T1.png"
 });
+var FETCH_TIMEOUT_MS = 18000;
+
+function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const merged = { ...options, signal: controller.signal };
+  return fetch(url, merged).finally(() => clearTimeout(timer));
+}
+
+async function fetchJson(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const response = await fetchWithTimeout(url, options, timeoutMs);
+  const payload = await response.json();
+  if (!response.ok) {
+    const error = new Error(payload?.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
 const state = {
   activeTab: "today", matches: [], expandedMatchId: null, details: new Map(),
   detailLoading: new Set(), detailErrors: new Map(), standings: [], standingsMeta: {},
-  ranges: [], loadingRanges: new Set(), scheduleStale: false, weekOffset: 0
+  ranges: [], loadingRanges: new Set(), scheduleStale: false, scheduleError: null,
+  standingsError: null, weekOffset: 0
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -224,13 +245,18 @@ function loadedScheduleRange() {
 function updateBatchStatus() {
   const loadedRange = loadedScheduleRange();
   const range = tabRange(state.activeTab);
+  const hasMatches = state.matches.length > 0;
   const status = isRangeLoading(range.from, range.to)
-    ? "Loading schedule…"
-    : state.scheduleStale
-      ? "Showing cached schedule · refresh when online"
-      : loadedRange
-        ? "Schedule ready"
-        : "No schedule loaded";
+    ? hasMatches ? "Refreshing schedule…" : "Loading schedule…"
+    : state.scheduleError
+      ? state.scheduleStale || hasMatches
+        ? `Showing cached schedule · ${state.scheduleError}`
+        : state.scheduleError
+      : state.scheduleStale
+        ? "Showing cached schedule · refresh when online"
+        : loadedRange
+          ? "Schedule ready"
+          : "No schedule loaded";
   $("#updated").textContent = status;
 }
 
@@ -247,7 +273,7 @@ function renderStandings() {
       <span class="standing-record">${escapeHtml(row.matchRecord)}<small>series</small></span>
       <span class="standing-record">${escapeHtml(row.gameRecord)}<small>games</small></span>
     </li>`).join("")
-    : '<li class="detail-message">Standings are currently unavailable.</li>';
+    : `<li class="detail-message">${escapeHtml(state.standingsError || "Standings are currently unavailable.")}</li>`;
 }
 
 function renderMatchDetails(match) {
@@ -318,9 +344,7 @@ async function loadMatchDetails(match, refresh = false) {
   if (!match.matchId || !String(match.matchId).trim()) return;
   state.detailLoading.add(match.id); renderMatches();
   try {
-    const response = await fetch(matchDetailsUrl(match, refresh));
-    if (!response.ok) throw new Error(`Match details unavailable (${response.status})`);
-    state.details.set(match.id, await response.json());
+    state.details.set(match.id, await fetchJson(matchDetailsUrl(match, refresh)));
   } catch (error) {
     console.warn(error); state.detailErrors.set(match.id, "Match details are currently unavailable.");
   } finally {
@@ -420,23 +444,28 @@ function isRangeLoading(from, to) {
 async function requestBatch(from, to) {
   const key = batchKey(from, to);
   if (state.loadingRanges.has(key)) return;
-  state.loadingRanges.add(key); updateBatchStatus();
+  state.loadingRanges.add(key);
+  state.scheduleError = null;
+  updateBatchStatus();
   try {
-    const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${encodeURIComponent(MATCH_TEAM)}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Schedule unavailable (${response.status})`);
-    const payload = await response.json();
+   const url = `${API_BASE_URL}/api/matches?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&team=${encodeURIComponent(MATCH_TEAM)}`;
+   const payload = await fetchJson(url);
     state.matches = mergeMatches([
       ...state.matches.filter((match) => match.date < from || match.date > to),
       ...(payload.matches || [])
     ]);
     state.ranges = normalizeRanges([...state.ranges, { from, to }]).slice(-12);
-    state.scheduleStale = false;
-    saveBatches();
+   state.scheduleStale = Boolean(payload.stale);
+   state.scheduleError = payload.error || (payload.stale ? "Schedule refresh failed." : null);
+   saveBatches();
   } catch (error) {
-    console.warn(error); state.scheduleStale = true;
+   console.warn(error);
+   state.scheduleStale = true;
+   state.scheduleError = error?.name === "AbortError"
+     ? "Schedule request timed out."
+     : error?.message || "Schedule is currently unavailable.";
   } finally {
-    state.loadingRanges.delete(key); renderMatches();
+   state.loadingRanges.delete(key); renderMatches();
   }
 }
 
@@ -446,12 +475,16 @@ async function fetchBatch(from, to) {
 
 async function loadStandings() {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/standings`);
-    if (!response.ok) throw new Error(`Standings unavailable (${response.status})`);
-    const payload = await response.json();
+    const payload = await fetchJson(`${API_BASE_URL}/api/standings`);
     state.standings = payload.standings || [];
     state.standingsMeta = payload.competition || { league: payload.league, season: payload.season };
-  } catch (error) { console.warn(error); }
+    state.standingsError = payload.error || null;
+  } catch (error) {
+    console.warn(error);
+    state.standingsError = error?.name === "AbortError"
+      ? "Standings request timed out."
+      : error?.message || "Standings are currently unavailable.";
+  }
   renderStandings();
 }
 

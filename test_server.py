@@ -1,6 +1,6 @@
 import json
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from threading import Event
 from unittest.mock import patch
 
@@ -41,10 +41,70 @@ def official_fragment(match_id, blue="T1", red="GEN"):
 
 
 class ScheduleTests(unittest.TestCase):
+    def setUp(self):
+        server.CACHE.update({
+            "expires": server.datetime.min.replace(tzinfo=server.timezone.utc),
+            "matches": [],
+            "stage": {"page": "", "label": "", "year": "", "key": "", "refreshedAt": ""},
+            "stale": False,
+            "error": None,
+        })
+        server.SCHEDULE_CACHE.update({
+            "expires": server.datetime.min.replace(tzinfo=server.timezone.utc),
+            "matches": [],
+            "stale": False,
+            "error": None,
+        })
+        server.STANDINGS_CACHE.update({
+            "expires": server.datetime.min.replace(tzinfo=server.timezone.utc),
+            "rows": [],
+            "competition": {"league": "LCK", "label": "LCK", "stage": ""},
+            "stale": False,
+            "error": None,
+        })
+        server.OFFICIAL_CACHE["expires"] = server.datetime.min.replace(
+            tzinfo=server.timezone.utc
+        )
+        server.OFFICIAL_CACHE["by_key"] = {}
+        server.OFFICIAL_CACHE["by_id"] = {}
+        server.OFFICIAL_CACHE["diagnostics"] = {}
+        server.LOGO_CACHE.clear()
+        server.DETAIL_CACHE.clear()
+
     def test_team_aliases_are_canonical(self):
         self.assertEqual(server.team_code("Gen.G"), "GEN")
         self.assertEqual(server.team_code("FearX"), "BFX")
         self.assertEqual(server.team_code("Hanwha Life Esports"), "HLE")
+
+    def test_run_with_timeout_raises_timeout_error(self):
+        blocked = Event()
+
+        def slow():
+            blocked.wait(timeout=0.2)
+
+        with self.assertRaises(TimeoutError):
+            server.run_with_timeout(slow, timeout_seconds=0.01)
+        blocked.set()
+
+    def test_logo_host_allowlist_accepts_supported_hosts(self):
+        self.assertTrue(server.is_allowed_logo_host(
+            "https://static.wikia.nocookie.net/example.png"
+        ))
+        self.assertTrue(server.is_allowed_logo_host(
+            "https://vignette.wikia.nocookie.net/example.png"
+        ))
+        self.assertTrue(server.is_allowed_logo_host(
+            "https://lol.fandom.com/wiki/T1"
+        ))
+        self.assertTrue(server.is_allowed_logo_host(
+            "https://static.fandom.com/wiki/T1"
+        ))
+        self.assertFalse(server.is_allowed_logo_host(
+            "http://static.wikia.nocookie.net/example.png"
+        ))
+        self.assertFalse(server.is_allowed_logo_host(
+            "https://example.com/wiki/T1"
+        ))
 
     def test_parse_matches_uses_the_two_team_cells(self):
         parsed = server.parse_matches("LCK", "LCK/2026_Season/Stage", leaguepedia_row(
@@ -381,17 +441,54 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(second, first)
         fetch_page.assert_called_once_with("T1/Match_History")
 
-    def test_fast_schedule_failure_is_not_cached(self):
-        server.SCHEDULE_CACHE["expires"] = server.datetime.min.replace(
-            tzinfo=server.timezone.utc
-        )
+    def test_fast_schedule_failure_returns_stale_cache(self):
+        stale_match = {
+            "id": "cached",
+            "date": "2026-08-30",
+            "time": "12:00",
+            "blue": "T1",
+            "red": "Gen.G",
+            "blueCode": "T1",
+            "redCode": "GEN",
+            "status": "upcoming",
+        }
+        server.SCHEDULE_CACHE["matches"] = [stale_match]
         with patch.object(server, "load_official_index", return_value={"by_date": {}}), \
              patch.object(server, "fetch_page", side_effect=OSError("offline")):
-            self.assertEqual(server.load_schedule_matches(), [])
-        self.assertLessEqual(
-            server.SCHEDULE_CACHE["expires"],
-            server.datetime.now(server.timezone.utc),
-        )
+            self.assertEqual(server.load_schedule_matches(), [stale_match])
+        self.assertTrue(server.SCHEDULE_CACHE["stale"])
+        self.assertIn("offline", server.SCHEDULE_CACHE["error"])
+
+    def test_load_standings_prefers_cached_matches_even_if_expired(self):
+        server.CACHE["matches"] = [{
+            "date": "2026-08-30",
+            "time": "12:00",
+            "league": "LCK",
+            "competition": "LCK",
+            "stage": "Rounds 3-4",
+            "blue": "T1",
+            "red": "Gen.G",
+            "blueCode": "T1",
+            "redCode": "GEN",
+            "blueScore": 2,
+            "redScore": 1,
+            "status": "completed",
+        }]
+        server.CACHE["stage"]["label"] = "Rounds 3-4"
+        with patch.object(server, "load_matches", side_effect=AssertionError(
+            "load_matches should not run when CACHE['matches'] is populated"
+        )):
+            rows = server.load_standings()
+        self.assertEqual([row["code"] for row in rows], ["T1", "GEN"])
+        self.assertFalse(server.STANDINGS_CACHE["stale"])
+
+    def test_load_standings_returns_stale_rows_after_refresh_failure(self):
+        server.STANDINGS_CACHE["rows"] = [{"team": "T1", "code": "T1", "rank": 1}]
+        with patch.object(server, "load_matches", side_effect=OSError("offline")):
+            rows = server.load_standings()
+        self.assertEqual(rows, [{"team": "T1", "code": "T1", "rank": 1}])
+        self.assertTrue(server.STANDINGS_CACHE["stale"])
+        self.assertIn("offline", server.STANDINGS_CACHE["error"])
 
     def test_game_details_return_unavailable_games_for_bad_feeds(self):
         official = {

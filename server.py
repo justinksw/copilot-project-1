@@ -2,7 +2,7 @@ import json
 import html as html_module
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
@@ -14,15 +14,20 @@ PORT = int(os.environ.get("PORT", "8080"))
 FANDOM_API = "https://lol.fandom.com/api.php"
 OFFICIAL_SCHEDULE_URL = "https://lolesports.com/en-US/schedule"
 FEED_API = "https://feed.lolesports.com/livestats/v1"
+API_LOAD_TIMEOUT_SECONDS = 20
 TEAM_MATCH_HISTORY_PAGES = {"T1": "T1/Match_History"}
 CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "matches": [],
     "stage": {"page": "", "label": "", "year": "", "key": "", "refreshedAt": ""},
+    "stale": False,
+    "error": None,
 }
 SCHEDULE_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "matches": [],
+    "stale": False,
+    "error": None,
 }
 OFFICIAL_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
@@ -36,6 +41,8 @@ STANDINGS_CACHE = {
     "expires": datetime.min.replace(tzinfo=timezone.utc),
     "rows": [],
     "competition": {"league": "LCK", "label": "LCK", "stage": ""},
+    "stale": False,
+    "error": None,
 }
 DEFAULT_STAGE_SUFFIX = "Rounds_3-4"  # Only used when Leaguepedia is unavailable.
 HONG_KONG = timezone(timedelta(hours=8))
@@ -190,6 +197,20 @@ def fetch_official_schedule():
     )
     with urlopen(request, timeout=20) as response:
         return response.read().decode("utf-8")
+
+
+def run_with_timeout(function, *args, timeout_seconds=API_LOAD_TIMEOUT_SECONDS, **kwargs):
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(function, *args, **kwargs)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except TimeoutError as error:
+        future.cancel()
+        raise TimeoutError(
+            f"{function.__name__} timed out after {timeout_seconds} seconds"
+        ) from error
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def season_page(year):
@@ -829,12 +850,22 @@ def extract_logo(team_cell):
     return match.group(1) if match else None
 
 
+def is_allowed_logo_host(url):
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (
+        host == "static.wikia.nocookie.net"
+        or host.endswith(".wikia.nocookie.net")
+        or host == "lol.fandom.com"
+        or host.endswith(".fandom.com")
+    )
+
+
 def fetch_logo(url):
     cached = LOGO_CACHE.get(url)
     if cached:
         return cached
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "static.wikia.nocookie.net":
+    if not is_allowed_logo_host(url):
         raise ValueError("Unsupported logo host")
     request = Request(url, headers={"User-Agent": "NexusWatch/0.1 local logo proxy"})
     with urlopen(request, timeout=20) as response:
@@ -1187,40 +1218,62 @@ def load_matches():
         now = datetime.now(timezone.utc)
         if CACHE["expires"] > now:
             return CACHE["matches"]
+        stale_matches = list(CACHE["matches"])
+        stale_stage = dict(CACHE["stage"])
         matches = []
         stage_matches = {}
-        with ThreadPoolExecutor(max_workers=2) as input_executor:
-            official_future = input_executor.submit(load_official_index)
-            pages_future = input_executor.submit(discover_stage_pages)
-            official_index = official_future.result()
-            pages = pages_future.result()
-        source_pages = [(page, "LCK") for page in pages]
-        source_pages.extend((page, team) for team, page in TEAM_MATCH_HISTORY_PAGES.items())
-        with ThreadPoolExecutor(max_workers=min(6, max(1, len(source_pages)))) as executor:
-            futures = {
-                (page, league): executor.submit(fetch_page, page)
-                for page, league in source_pages
+        try:
+            with ThreadPoolExecutor(max_workers=2) as input_executor:
+                official_future = input_executor.submit(load_official_index)
+                pages_future = input_executor.submit(discover_stage_pages)
+                official_index = official_future.result()
+                pages = pages_future.result()
+            source_pages = [(page, "LCK") for page in pages]
+            source_pages.extend((page, team) for team, page in TEAM_MATCH_HISTORY_PAGES.items())
+            page_errors = False
+            with ThreadPoolExecutor(max_workers=min(6, max(1, len(source_pages)))) as executor:
+                futures = {
+                    (page, league): executor.submit(fetch_page, page)
+                    for page, league in source_pages
+                }
+                for (page, league), future in futures.items():
+                    try:
+                        parsed = parse_matches(
+                            league, page, future.result(), official_index
+                        )
+                        if league == "LCK":
+                            stage_matches[page] = parsed
+                        matches.extend(parsed)
+                    except Exception as error:
+                        page_errors = True
+                        print(f"[Leaguepedia] {page}: {error}")
+            matches = merge_match_records(matches)
+            if not matches and page_errors and stale_matches:
+                CACHE["stale"] = True
+                CACHE["error"] = "Schedule refresh failed."
+                CACHE["stage"] = stale_stage
+                return stale_matches
+            active_page = select_active_stage(stage_matches)
+            CACHE["stage"] = {
+                "page": active_page,
+                "label": stage_label(active_page),
+                "key": active_page.rsplit("/", 1)[-1],
+                "year": active_page.split("/")[1].split("_")[0],
+                "refreshedAt": now.isoformat(),
             }
-            for (page, league), future in futures.items():
-                try:
-                    parsed = parse_matches(league, page, future.result(), official_index)
-                    if league == "LCK":
-                        stage_matches[page] = parsed
-                    matches.extend(parsed)
-                except Exception as error:
-                    print(f"[Leaguepedia] {page}: {error}")
-        matches = merge_match_records(matches)
-        active_page = select_active_stage(stage_matches)
-        CACHE["stage"] = {
-            "page": active_page,
-            "label": stage_label(active_page),
-            "key": active_page.rsplit("/", 1)[-1],
-            "year": active_page.split("/")[1].split("_")[0],
-            "refreshedAt": now.isoformat(),
-        }
-        CACHE["matches"] = matches
-        CACHE["expires"] = now + timedelta(minutes=10)
-        return matches
+            CACHE["matches"] = matches
+            CACHE["expires"] = now + timedelta(minutes=10)
+            CACHE["stale"] = False
+            CACHE["error"] = None
+            return matches
+        except Exception as error:
+            print(f"[Leaguepedia] full match load failed: {error}")
+            if stale_matches:
+                CACHE["stale"] = True
+                CACHE["error"] = str(error)
+                CACHE["stage"] = stale_stage
+                return stale_matches
+            raise
 
 
 def load_schedule_matches():
@@ -1231,6 +1284,7 @@ def load_schedule_matches():
         now = datetime.now(timezone.utc)
         if SCHEDULE_CACHE["expires"] > now:
             return SCHEDULE_CACHE["matches"]
+        stale_matches = list(SCHEDULE_CACHE["matches"])
         page = TEAM_MATCH_HISTORY_PAGES["T1"]
         try:
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1241,10 +1295,16 @@ def load_schedule_matches():
                 ))
         except Exception as error:
             print(f"[Leaguepedia] {page}: {error}")
-            return []
+            if stale_matches:
+                SCHEDULE_CACHE["stale"] = True
+                SCHEDULE_CACHE["error"] = str(error)
+                return stale_matches
+            raise
         SCHEDULE_CACHE.update({
             "expires": now + timedelta(minutes=10),
             "matches": matches,
+            "stale": False,
+            "error": None,
         })
         return matches
 
@@ -1357,36 +1417,68 @@ def load_standings():
         now = datetime.now(timezone.utc)
         if STANDINGS_CACHE["expires"] > now:
             return STANDINGS_CACHE["rows"]
-        matches = load_matches()
+        stale_rows = list(STANDINGS_CACHE["rows"])
+    try:
+        matches = list(CACHE["matches"]) if CACHE["matches"] else run_with_timeout(
+            load_matches
+        )
         competition = select_competition(matches)
         rows = build_standings(
             match for match in matches if competition_name(match) == competition["league"]
         )
         if len(rows) < 4 and competition["league"] != "LCK":
-            competition = {"league": "LCK", "label": "LCK", "stage": CACHE["stage"]["label"]}
+            competition = {
+                "league": "LCK",
+                "label": "LCK",
+                "stage": CACHE["stage"]["label"],
+            }
             rows = build_standings(
                 match for match in matches if competition_name(match) == "LCK"
             )
+    except Exception as error:
+        print(f"[Standings] refresh failed: {error}")
+        if stale_rows:
+            with STANDINGS_CACHE_LOCK:
+                STANDINGS_CACHE["stale"] = True
+                STANDINGS_CACHE["error"] = str(error)
+            return stale_rows
+        raise
+    with STANDINGS_CACHE_LOCK:
         STANDINGS_CACHE.update({
             "expires": now + timedelta(minutes=10),
             "rows": rows,
             "competition": competition,
+            "stale": False,
+            "error": None,
         })
         return rows
 
 
 class Handler(SimpleHTTPRequestHandler):
+    def send_json(self, status, payload, cache_control="no-store"):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = urlparse(self.path)
         if path.path == "/api/logo":
             requested_url = parse_qs(path.query).get("url", [None])[0]
             if not requested_url:
-                self.send_error(400, "Missing logo URL")
+                self.send_json(400, {"error": "Missing logo URL"})
                 return
             try:
                 body, content_type = fetch_logo(unquote(requested_url))
-            except (OSError, ValueError) as error:
-                self.send_error(502, f"Logo proxy failed: {error}")
+            except ValueError as error:
+                self.send_json(400, {"error": str(error)})
+                return
+            except OSError as error:
+                self.send_json(502, {"error": f"Logo proxy failed: {error}"})
                 return
             self.send_response(200)
             self.send_header("Content-Type", content_type)
@@ -1431,52 +1523,69 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path.path == "/api/standings":
-            standings = load_standings()
-            body = json.dumps({
+            try:
+                standings = run_with_timeout(load_standings)
+            except TimeoutError as error:
+                if not STANDINGS_CACHE["rows"]:
+                    self.send_json(504, {"error": str(error)})
+                    return
+                STANDINGS_CACHE["stale"] = True
+                STANDINGS_CACHE["error"] = str(error)
+                standings = STANDINGS_CACHE["rows"]
+            except Exception as error:
+                if not STANDINGS_CACHE["rows"]:
+                    self.send_json(502, {"error": str(error)})
+                    return
+                STANDINGS_CACHE["stale"] = True
+                STANDINGS_CACHE["error"] = str(error)
+                standings = STANDINGS_CACHE["rows"]
+            self.send_json(200, {
                 "league": STANDINGS_CACHE["competition"]["league"],
                 "season": CACHE["stage"]["year"],
                 "competition": STANDINGS_CACHE["competition"],
                 "standings": standings,
                 "cached": STANDINGS_CACHE["expires"].isoformat(),
-            }).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "public, max-age=600")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+                "stale": STANDINGS_CACHE["stale"],
+                "error": STANDINGS_CACHE["error"],
+            }, cache_control="public, max-age=600")
             return
         if path.path != "/api/matches":
             return super().do_GET()
         query = parse_qs(path.query)
         start, end = requested_range(query)
         team = query.get("team", [None])[0]
-        matches = (
-            load_schedule_matches()
-            if team_code(team) == "T1"
-            else load_matches()
-        )
+        use_schedule_cache = team_code(team) == "T1"
+        loader = load_schedule_matches if use_schedule_cache else load_matches
+        selected_cache = SCHEDULE_CACHE if use_schedule_cache else CACHE
+        try:
+            matches = run_with_timeout(loader)
+        except TimeoutError as error:
+            if not selected_cache["matches"]:
+                self.send_json(504, {"error": str(error)})
+                return
+            selected_cache["stale"] = True
+            selected_cache["error"] = str(error)
+            matches = selected_cache["matches"]
+        except Exception as error:
+            if not selected_cache["matches"]:
+                self.send_json(502, {"error": str(error)})
+                return
+            selected_cache["stale"] = True
+            selected_cache["error"] = str(error)
+            matches = selected_cache["matches"]
         result = [
             match for match in matches
             if start <= (normalize_date(match.get("date")) or start) <= end and team_matches(match, team)
         ]
-        body = json.dumps({
+        self.send_json(200, {
             "matches": result,
             "stage": CACHE["stage"],
             "range": {"from": start.isoformat(), "to": end.isoformat()},
-            "cached": CACHE["expires"].isoformat(),
+            "cached": selected_cache["expires"].isoformat(),
             "hasMore": True,
-        }).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header(
-            "Cache-Control", "public, max-age=60, stale-while-revalidate=300"
-        )
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+            "stale": selected_cache["stale"],
+            "error": selected_cache["error"],
+        }, cache_control="public, max-age=60, stale-while-revalidate=300")
 
 
 if __name__ == "__main__":
