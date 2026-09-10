@@ -385,6 +385,7 @@ class ScheduleTests(unittest.TestCase):
         server.SCHEDULE_CACHE["expires"] = server.datetime.min.replace(
             tzinfo=server.timezone.utc
         )
+        server.SCHEDULE_CACHE["matches"] = []
         with patch.object(server, "load_official_index", return_value={"by_date": {}}), \
              patch.object(server, "fetch_page", side_effect=OSError("offline")):
             self.assertEqual(server.load_schedule_matches(), [])
@@ -392,6 +393,86 @@ class ScheduleTests(unittest.TestCase):
             server.SCHEDULE_CACHE["expires"],
             server.datetime.now(server.timezone.utc),
         )
+
+    def test_stale_schedule_returned_on_fetch_failure(self):
+        cached = [{
+            "date": "2026-08-30", "time": "12:00", "blue": "T1", "red": "Gen.G",
+            "blueCode": "T1", "redCode": "GEN", "status": "completed",
+            "blueScore": 2, "redScore": 1,
+        }]
+        server.SCHEDULE_CACHE["expires"] = server.datetime.min.replace(
+            tzinfo=server.timezone.utc
+        )
+        server.SCHEDULE_CACHE["matches"] = cached
+        with patch.object(server, "load_official_index", return_value={"by_date": {}}), \
+             patch.object(server, "fetch_page", side_effect=OSError("offline")):
+            result = server.load_schedule_matches()
+        self.assertEqual(result, cached)
+        self.assertLessEqual(
+            server.SCHEDULE_CACHE["expires"],
+            server.datetime.now(server.timezone.utc),
+        )
+
+    def test_standings_prefers_cache_matches_without_load_matches(self):
+        server.STANDINGS_CACHE["expires"] = server.datetime.min.replace(
+            tzinfo=server.timezone.utc
+        )
+        server.STANDINGS_CACHE["rows"] = []
+        server.CACHE["expires"] = server.datetime.min.replace(
+            tzinfo=server.timezone.utc
+        )
+        server.CACHE["matches"] = [{
+            "date": "2026-08-30", "time": "12:00", "league": "LCK",
+            "competition": "LCK", "stage": "Rounds 1-2",
+            "blue": "T1", "red": "Gen.G", "blueCode": "T1", "redCode": "GEN",
+            "blueScore": 2, "redScore": 1, "status": "completed",
+        }, {
+            "date": "2026-08-29", "time": "12:00", "league": "LCK",
+            "competition": "LCK", "stage": "Rounds 1-2",
+            "blue": "HLE", "red": "KT", "blueCode": "HLE", "redCode": "KT",
+            "blueScore": 2, "redScore": 0, "status": "completed",
+        }, {
+            "date": "2026-08-28", "time": "12:00", "league": "LCK",
+            "competition": "LCK", "stage": "Rounds 1-2",
+            "blue": "DK", "red": "BFX", "blueCode": "DK", "redCode": "BFX",
+            "blueScore": 2, "redScore": 1, "status": "completed",
+        }, {
+            "date": "2026-08-27", "time": "12:00", "league": "LCK",
+            "competition": "LCK", "stage": "Rounds 1-2",
+            "blue": "NS", "red": "BRO", "blueCode": "NS", "redCode": "BRO",
+            "blueScore": 2, "redScore": 1, "status": "completed",
+        }]
+        with patch.object(server, "load_matches", side_effect=AssertionError("should not load")):
+            rows = server.load_standings()
+        self.assertGreaterEqual(len(rows), 4)
+        self.assertTrue(any(row["code"] == "T1" for row in rows))
+
+    def test_run_with_timeout_raises_timeout_error(self):
+        import time
+
+        def hang():
+            time.sleep(2)
+            return "done"
+
+        with self.assertRaises(TimeoutError):
+            server.run_with_timeout(hang, timeout_seconds=0.1)
+
+    def test_logo_allowlist_rejects_unknown_host(self):
+        self.assertFalse(server.is_allowed_logo_host("evil.example.com"))
+        self.assertFalse(server.is_allowed_logo_host(None))
+        with self.assertRaises(ValueError):
+            server.fetch_logo("https://evil.example.com/logo.png")
+
+    def test_logo_allowlist_accepts_fandom_hosts(self):
+        self.assertTrue(server.is_allowed_logo_host("static.wikia.nocookie.net"))
+        self.assertTrue(server.is_allowed_logo_host("images.wikia.nocookie.net"))
+        self.assertTrue(server.is_allowed_logo_host("lol.fandom.com"))
+        self.assertTrue(server.is_allowed_logo_host("static.fandom.com"))
+        # Host check only — do not hit network for acceptance.
+        parsed_ok = server.urlparse(
+            "https://static.wikia.nocookie.net/leagueoflegends/images/x.png"
+        )
+        self.assertTrue(server.is_allowed_logo_host(parsed_ok.hostname))
 
     def test_game_details_return_unavailable_games_for_bad_feeds(self):
         official = {

@@ -2,7 +2,7 @@ import json
 import html as html_module
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
@@ -74,6 +74,31 @@ STAGE_CACHE_LOCK = Lock()
 CACHE_LOCK = Lock()
 SCHEDULE_CACHE_LOCK = Lock()
 STANDINGS_CACHE_LOCK = Lock()
+API_LOAD_TIMEOUT_SECONDS = 20
+
+
+def run_with_timeout(fn, timeout_seconds=API_LOAD_TIMEOUT_SECONDS):
+    """Run callable in a worker thread; raise TimeoutError if it exceeds the limit."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError as error:
+            future.cancel()
+            raise TimeoutError(
+                f"Operation timed out after {timeout_seconds}s"
+            ) from error
+
+
+def is_allowed_logo_host(hostname):
+    if not hostname:
+        return False
+    host = str(hostname).lower().rstrip(".")
+    if host == "static.wikia.nocookie.net" or host.endswith(".wikia.nocookie.net"):
+        return True
+    if host == "lol.fandom.com" or host.endswith(".fandom.com"):
+        return True
+    return False
 
 
 def team_code(name):
@@ -834,7 +859,7 @@ def fetch_logo(url):
     if cached:
         return cached
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "static.wikia.nocookie.net":
+    if parsed.scheme != "https" or not is_allowed_logo_host(parsed.hostname):
         raise ValueError("Unsupported logo host")
     request = Request(url, headers={"User-Agent": "NexusWatch/0.1 local logo proxy"})
     with urlopen(request, timeout=20) as response:
@@ -1187,40 +1212,48 @@ def load_matches():
         now = datetime.now(timezone.utc)
         if CACHE["expires"] > now:
             return CACHE["matches"]
-        matches = []
-        stage_matches = {}
-        with ThreadPoolExecutor(max_workers=2) as input_executor:
-            official_future = input_executor.submit(load_official_index)
-            pages_future = input_executor.submit(discover_stage_pages)
-            official_index = official_future.result()
-            pages = pages_future.result()
-        source_pages = [(page, "LCK") for page in pages]
-        source_pages.extend((page, team) for team, page in TEAM_MATCH_HISTORY_PAGES.items())
-        with ThreadPoolExecutor(max_workers=min(6, max(1, len(source_pages)))) as executor:
-            futures = {
-                (page, league): executor.submit(fetch_page, page)
-                for page, league in source_pages
+        stale_matches = list(CACHE.get("matches") or [])
+        try:
+            matches = []
+            stage_matches = {}
+            with ThreadPoolExecutor(max_workers=2) as input_executor:
+                official_future = input_executor.submit(load_official_index)
+                pages_future = input_executor.submit(discover_stage_pages)
+                official_index = official_future.result()
+                pages = pages_future.result()
+            source_pages = [(page, "LCK") for page in pages]
+            source_pages.extend((page, team) for team, page in TEAM_MATCH_HISTORY_PAGES.items())
+            with ThreadPoolExecutor(max_workers=min(6, max(1, len(source_pages)))) as executor:
+                futures = {
+                    (page, league): executor.submit(fetch_page, page)
+                    for page, league in source_pages
+                }
+                for (page, league), future in futures.items():
+                    try:
+                        parsed = parse_matches(league, page, future.result(), official_index)
+                        if league == "LCK":
+                            stage_matches[page] = parsed
+                        matches.extend(parsed)
+                    except Exception as error:
+                        print(f"[Leaguepedia] {page}: {error}")
+            matches = merge_match_records(matches)
+            if not matches and stale_matches:
+                print("[matches] refresh produced no rows; returning stale cache")
+                return stale_matches
+            active_page = select_active_stage(stage_matches)
+            CACHE["stage"] = {
+                "page": active_page,
+                "label": stage_label(active_page),
+                "key": active_page.rsplit("/", 1)[-1],
+                "year": active_page.split("/")[1].split("_")[0] if "/" in active_page else "",
+                "refreshedAt": now.isoformat(),
             }
-            for (page, league), future in futures.items():
-                try:
-                    parsed = parse_matches(league, page, future.result(), official_index)
-                    if league == "LCK":
-                        stage_matches[page] = parsed
-                    matches.extend(parsed)
-                except Exception as error:
-                    print(f"[Leaguepedia] {page}: {error}")
-        matches = merge_match_records(matches)
-        active_page = select_active_stage(stage_matches)
-        CACHE["stage"] = {
-            "page": active_page,
-            "label": stage_label(active_page),
-            "key": active_page.rsplit("/", 1)[-1],
-            "year": active_page.split("/")[1].split("_")[0],
-            "refreshedAt": now.isoformat(),
-        }
-        CACHE["matches"] = matches
-        CACHE["expires"] = now + timedelta(minutes=10)
-        return matches
+            CACHE["matches"] = matches
+            CACHE["expires"] = now + timedelta(minutes=10)
+            return matches
+        except Exception as error:
+            print(f"[matches] refresh failed: {error}")
+            return stale_matches
 
 
 def load_schedule_matches():
@@ -1232,6 +1265,7 @@ def load_schedule_matches():
         if SCHEDULE_CACHE["expires"] > now:
             return SCHEDULE_CACHE["matches"]
         page = TEAM_MATCH_HISTORY_PAGES["T1"]
+        stale_matches = list(SCHEDULE_CACHE.get("matches") or [])
         try:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 page_future = executor.submit(fetch_page, page)
@@ -1241,7 +1275,7 @@ def load_schedule_matches():
                 ))
         except Exception as error:
             print(f"[Leaguepedia] {page}: {error}")
-            return []
+            return stale_matches
         SCHEDULE_CACHE.update({
             "expires": now + timedelta(minutes=10),
             "matches": matches,
@@ -1349,24 +1383,49 @@ def build_standings(matches):
     return rows
 
 
+def _compute_standings_from_matches(matches):
+    competition = select_competition(matches)
+    rows = build_standings(
+        match for match in matches if competition_name(match) == competition["league"]
+    )
+    if len(rows) < 4 and competition["league"] != "LCK":
+        competition = {"league": "LCK", "label": "LCK", "stage": CACHE["stage"]["label"]}
+        rows = build_standings(
+            match for match in matches if competition_name(match) == "LCK"
+        )
+    return rows, competition
+
+
 def load_standings():
     now = datetime.now(timezone.utc)
     if STANDINGS_CACHE["expires"] > now:
         return STANDINGS_CACHE["rows"]
+
+    # Prefer any known match cache (even expired) so standings never waits forever.
+    matches = list(CACHE.get("matches") or [])
+    if not matches:
+        try:
+            matches = run_with_timeout(load_matches, API_LOAD_TIMEOUT_SECONDS)
+        except Exception as error:
+            print(f"[standings] load_matches failed: {error}")
+            stale_rows = list(STANDINGS_CACHE.get("rows") or [])
+            if stale_rows:
+                return stale_rows
+            raise
+
+    try:
+        rows, competition = _compute_standings_from_matches(matches)
+    except Exception as error:
+        print(f"[standings] compute failed: {error}")
+        stale_rows = list(STANDINGS_CACHE.get("rows") or [])
+        if stale_rows:
+            return stale_rows
+        raise
+
     with STANDINGS_CACHE_LOCK:
         now = datetime.now(timezone.utc)
         if STANDINGS_CACHE["expires"] > now:
             return STANDINGS_CACHE["rows"]
-        matches = load_matches()
-        competition = select_competition(matches)
-        rows = build_standings(
-            match for match in matches if competition_name(match) == competition["league"]
-        )
-        if len(rows) < 4 and competition["league"] != "LCK":
-            competition = {"league": "LCK", "label": "LCK", "stage": CACHE["stage"]["label"]}
-            rows = build_standings(
-                match for match in matches if competition_name(match) == "LCK"
-            )
         STANDINGS_CACHE.update({
             "expires": now + timedelta(minutes=10),
             "rows": rows,
@@ -1385,7 +1444,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             try:
                 body, content_type = fetch_logo(unquote(requested_url))
-            except (OSError, ValueError) as error:
+            except ValueError as error:
+                self.send_error(400, str(error))
+                return
+            except OSError as error:
                 self.send_error(502, f"Logo proxy failed: {error}")
                 return
             self.send_response(200)
@@ -1431,14 +1493,53 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path.path == "/api/standings":
-            standings = load_standings()
-            body = json.dumps({
+            stale = False
+            try:
+                now = datetime.now(timezone.utc)
+                if STANDINGS_CACHE["expires"] > now:
+                    standings = STANDINGS_CACHE["rows"]
+                else:
+                    standings = run_with_timeout(load_standings, API_LOAD_TIMEOUT_SECONDS)
+            except TimeoutError:
+                if STANDINGS_CACHE.get("rows"):
+                    standings = STANDINGS_CACHE["rows"]
+                    stale = True
+                else:
+                    body = json.dumps({
+                        "error": "Standings load timed out",
+                    }).encode()
+                    self.send_response(504)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+            except Exception as error:
+                if STANDINGS_CACHE.get("rows"):
+                    standings = STANDINGS_CACHE["rows"]
+                    stale = True
+                else:
+                    body = json.dumps({
+                        "error": f"Standings unavailable: {error}",
+                    }).encode()
+                    self.send_response(503)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+            payload = {
                 "league": STANDINGS_CACHE["competition"]["league"],
                 "season": CACHE["stage"]["year"],
                 "competition": STANDINGS_CACHE["competition"],
                 "standings": standings,
                 "cached": STANDINGS_CACHE["expires"].isoformat(),
-            }).encode()
+            }
+            if stale:
+                payload["stale"] = True
+            body = json.dumps(payload).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "public, max-age=600")
@@ -1452,22 +1553,64 @@ class Handler(SimpleHTTPRequestHandler):
         query = parse_qs(path.query)
         start, end = requested_range(query)
         team = query.get("team", [None])[0]
-        matches = (
-            load_schedule_matches()
-            if team_code(team) == "T1"
-            else load_matches()
-        )
+        use_schedule = team_code(team) == "T1"
+        stale = False
+        try:
+            now = datetime.now(timezone.utc)
+            cache = SCHEDULE_CACHE if use_schedule else CACHE
+            if cache["expires"] > now:
+                matches = cache["matches"]
+            else:
+                loader = load_schedule_matches if use_schedule else load_matches
+                matches = run_with_timeout(loader, API_LOAD_TIMEOUT_SECONDS)
+        except TimeoutError:
+            cache = SCHEDULE_CACHE if use_schedule else CACHE
+            if cache.get("matches"):
+                matches = cache["matches"]
+                stale = True
+            else:
+                body = json.dumps({
+                    "error": "Schedule load timed out",
+                    "matches": [],
+                }).encode()
+                self.send_response(504)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        except Exception as error:
+            cache = SCHEDULE_CACHE if use_schedule else CACHE
+            if cache.get("matches"):
+                matches = cache["matches"]
+                stale = True
+            else:
+                body = json.dumps({
+                    "error": f"Schedule unavailable: {error}",
+                    "matches": [],
+                }).encode()
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
         result = [
             match for match in matches
             if start <= (normalize_date(match.get("date")) or start) <= end and team_matches(match, team)
         ]
-        body = json.dumps({
+        payload = {
             "matches": result,
             "stage": CACHE["stage"],
             "range": {"from": start.isoformat(), "to": end.isoformat()},
-            "cached": CACHE["expires"].isoformat(),
+            "cached": (SCHEDULE_CACHE if use_schedule else CACHE)["expires"].isoformat(),
             "hasMore": True,
-        }).encode()
+        }
+        if stale:
+            payload["stale"] = True
+        body = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header(
