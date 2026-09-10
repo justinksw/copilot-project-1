@@ -457,6 +457,23 @@ class ScheduleTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             server.run_with_timeout(hang, timeout_seconds=0.1)
 
+
+    def test_run_with_timeout_does_not_block_on_hung_worker(self):
+        """Timeout must return even if the worker keeps running (no wait=True shutdown)."""
+        import time
+        started = time.monotonic()
+        blocked = Event()
+
+        def forever():
+            blocked.wait(timeout=5)
+
+        with self.assertRaises(TimeoutError):
+            server.run_with_timeout(forever, timeout_seconds=0.05)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.0)
+        blocked.set()
+
+
     def test_logo_allowlist_rejects_unknown_host(self):
         self.assertFalse(server.is_allowed_logo_host("evil.example.com"))
         self.assertFalse(server.is_allowed_logo_host(None))
